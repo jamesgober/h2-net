@@ -2,7 +2,7 @@
 
 > The design, strategy, and decision record for `h2-net`. A living document: every design decision, idea, or open question about h2-net is written here or in [`ROADMAP.md`](./ROADMAP.md) before it is acted on.
 >
-> **Status:** scaffold, `0.1.0`. **Scheduled later** (see `_strategy/WEB-STACK-DELIVERABLES.md`): behind Apache or nginx, the front end speaks HTTP/2 to browsers and HTTP/1.1 to us.
+> **Status:** scaffold, `0.1.0`. **Scheduled later**: behind Apache or nginx, the front end speaks HTTP/2 to browsers and HTTP/1.1 to us.
 
 ---
 
