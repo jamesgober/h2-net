@@ -77,7 +77,25 @@ Each budget comes with an attack test that ends the connection with it and gets 
 | `huffman/encode_1k` | 1.29 us | 757 MiB/s |
 | `conn/requests_10k` (17-field GET, 10-field response with a 1 KiB body, on one connection) | 24.3 ms | 2.4 us a request and its response |
 
-Known room, not yet taken: the encoder finds names by a linear scan of the static table (a match on the name would replace it), and the Huffman decoder reads one symbol per step (a multi-bit state table would read several). Neither is a budget question; both wait for a profile of the connection engine, which decides what dominates.
+### HTTP/2 against HTTP/1.1 (2026-11-20)
+
+`h1/requests_10k` runs the `conn/requests_10k` work through http-net's HTTP/1.1 server connection: the same 17 request fields, the same response fields and 1 KiB body, one connection, the head written with `write_head` (no allocation). Alternated runs on one machine:
+
+| Benchmark | Before | After the changes below | Per request |
+|---|---|---|---|
+| `h1/requests_10k` | 3.66 ms | 3.51 ms | 0.35 us |
+| `conn/requests_10k` | 24.3 ms | 21.6 ms | 2.16 us |
+| `hpack/encode_response` | 5.38 ms | 3.01 ms | 0.30 us |
+| `hpack/decode_browser_request` | 4.36 ms | 4.29 ms | 0.43 us |
+
+HTTP/2 costs about six times HTTP/1.1 per request here. Of the 2.16 us: HPACK decode 0.43 and encode 0.30; the mapping onto http-net (the head written out as HTTP/1.1, parsed, and copied into an owned head) about an HTTP/1.1 parse, 0.4 [est.]; the rest, about 1 us, is framing, stream bookkeeping, events, and output, not yet broken down. Taken so far: the encoder finds static names through a generated `match` on the name instead of scanning all 61 entries (encode -44%), and a response head reuses one scratch list instead of allocating one (no allocation per head beyond the owned request head).
+
+Next, each written as an experiment:
+- **Profile the 1 us.** Hypothesis: most of it is the per-stream map, the event queue, and the copies of each frame into and out of the buffers. Method: a sampling profile of `conn/requests_10k` on Linux (perf), then a benchmark per piece. Expected cost: none at run time.
+- **Owned head without a second check.** Hypothesis: building the owned head straight from the parse saves two allocations and a copy per request. Method: an http-net constructor that keeps a head it has just parsed (the pooling attempt in section 6 failed only on `from_parts` checking the head again). Expected cost [est.]: 50 to 100 ns a request saved; an http-net change.
+- **Huffman decode by nibble.** Hypothesis: a 4-bit state table halves Huffman decode, which is most of decoding a `:path` and a `cookie` sent as literals each time. Method: the table generated from the code, fuzzed against the current decoder. Expected cost: a 4 KiB table.
+
+None of these is a budget question: every check stays as it is.
 
 ## 8. Prerequisites
 
