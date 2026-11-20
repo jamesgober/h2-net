@@ -11,6 +11,12 @@
 
 ## [Unreleased]
 
+---
+
+## [0.3.1] - 2026-11-20
+
+The client side, and the first release on crates.io.
+
 ### Added
 
 - `conn::ClientConn`, the client side of a connection: the same protocol
@@ -92,6 +98,7 @@ The scaffold and the plan. No functional code yet.
 - `dev/PLAN.md` (purpose, scope, architecture, threats, ecosystem, open
   decisions, decision log), `dev/DIRECTIVES.md`, and `dev/ROADMAP.md`.
 
-[Unreleased]: https://github.com/jamesgober/h2-net/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jamesgober/h2-net/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/jamesgober/h2-net/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/jamesgober/h2-net/releases/tag/v0.3.0
 [0.1.0]: https://github.com/jamesgober/h2-net/releases/tag/v0.1.0

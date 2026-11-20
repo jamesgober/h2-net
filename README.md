@@ -26,10 +26,10 @@
     <br>
     <hr>
     <p>
-        <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>. <code>no_std</code> with <code>alloc</code>. No runtime dependencies.
+        <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>. <code>no_std</code> with <code>alloc</code>. One dependency: http-net.
     </p>
     <blockquote>
-        <strong>Status: <code>0.3.0</code>, in development.</strong> The codec (frames and HPACK) and the server connection engine are built and tested; serve-net's side (ALPN `h2`, several streams per connection) is next. The schedule is in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>.
+        <strong>Status: <code>0.3.1</code>, in development.</strong> The codec (frames and HPACK) and both sides of a connection are built and tested; serve-net's side (ALPN <code>h2</code>, several streams per connection) builds on this release. The schedule is in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>.
     </blockquote>
 </div>
 

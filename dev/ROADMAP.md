@@ -29,13 +29,14 @@ The design lock of 0.2.0 now covers the codec only; the connection API moves to 
 - [x] A fuzz target for the connection.
 - [ ] The priority field's dictionary parser moves to parse-net's Structured Fields once http-net depends on a parse-net that has them (one parse-net in the tree, not two).
 - [x] Priority signals (RFC 9218): read and reported to the driver (moved here from v0.4.0's list once built; the scheduling stays serve-net's).
-- [x] Released: tagged v0.3.0 on GitHub, 2026-11-20. The first crates.io publish waits on James.
+- [x] Released: tagged v0.3.0 on GitHub, 2026-11-20. Not published on crates.io; 0.3.1 is the first publish (D-016).
 
 ## v0.4.0 - Client, and in serve-net
 - [x] The client side: `ClientConn`, sharing the protocol and the budgets with the server side (D-015); tests against the server side in memory; a fuzz target with a hostile server.
 - [ ] A response head as http-net's type, once http-net has an owned response head (asked of http-net).
 - [ ] serve-net's engine slot for several streams per connection; ALPN `h2` selects h2-net; serve-net's scheduler uses the priority signals. Waits on h2-net's first functional release: serve-net takes dependencies at published versions only, never by path.
 - [x] Head pooling: tried and rejected (PLAN section 6).
+- [x] v0.3.1: the client side, released and published on crates.io, the first publish (D-016).
 
 ## v1.0.0 - Stable
 - [ ] Frozen after direct mode has served HTTP/2 in production.
