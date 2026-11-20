@@ -11,6 +11,34 @@
 
 ## [Unreleased]
 
+The codec: frames and HPACK.
+
+### Added
+
+- `frame`: every frame type of RFC 9113 and `PRIORITY_UPDATE` (RFC 9218),
+  read as borrowed views (`decode`) and written back (`encode`), with every
+  check RFC 9113 puts on a frame by itself. A frame over
+  `SETTINGS_MAX_FRAME_SIZE` is refused from its header. Refusals RFC 9113
+  scopes to a stream are reported apart from connection errors. The encoder
+  refuses whatever the decoder would refuse.
+- `SETTINGS` parameters with their ranges (RFC 9113, RFC 8441, RFC 9218),
+  `SettingValues` for one side's settings, and `settings_frame`.
+- `hpack`: `Decoder` and `Encoder` with bounded dynamic tables, Huffman
+  coding, and the size update rules of RFC 7541 and RFC 9113. A field block
+  decodes into a `HeaderList` with a budget checked before each field is
+  copied; a block over the budget keeps the dynamic table in step and is
+  reported, so the request can be refused without closing the connection.
+  The encoder never indexes credentials or fields marked sensitive.
+- `ErrorCode`, `FrameError`, `HpackError`.
+- Tests: RFC 7541 Appendix C byte for byte, a decode at every split point
+  for every frame type, every refusal in RFC 9113 section 6. Fuzz targets
+  for the frame decoder, the HPACK decoder, the HPACK round trip, and the
+  Huffman code, with a smoke run in CI. Benchmarks.
+
+### Changed
+
+- The crate is `no_std` with `alloc`.
+
 ---
 
 ## [0.1.0] - 2026-10-13

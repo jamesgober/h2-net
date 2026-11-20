@@ -1,0 +1,47 @@
+[package]
+name    = "h2-net-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0 OR MIT"
+authors = ["James Gober <me@jamesgober.com>"]
+description = "cargo-fuzz targets for h2-net (not published)."
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone: not a member of any workspace above it.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary     = { version = "1", features = ["derive"] }
+h2-net        = { path = ".." }
+
+[[bin]]
+name  = "frame_decode"
+path  = "fuzz_targets/frame_decode.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "hpack_decode"
+path  = "fuzz_targets/hpack_decode.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "hpack_round_trip"
+path  = "fuzz_targets/hpack_round_trip.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "huffman"
+path  = "fuzz_targets/huffman.rs"
+test  = false
+doc   = false
+bench = false
