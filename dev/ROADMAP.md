@@ -27,13 +27,12 @@ The design lock of 0.2.0 now covers the codec only; the connection API moves to 
 - [x] Mapping to http-net's request type; responses from status and fields (HTTP/1.1's connection fields dropped).
 - [x] Every budget in PLAN section 5, each with an attack test that must fail without it; offences reported (`ConnError::is_abuse`) so serve-net can make them bouncer strikes.
 - [x] A fuzz target for the connection.
-- [ ] Priority signals (RFC 9218): `PRIORITY_UPDATE` frames are read and counted, not acted on. Moved to v0.4.0: which response gets the next window is serve-net's scheduling decision, and an engine that orders nothing has nothing to act on.
+- [x] Priority signals (RFC 9218): read and reported to the driver (moved here from v0.4.0's list once built; the scheduling stays serve-net's).
 - [ ] Release.
 
 ## v0.4.0 - In serve-net
-- [ ] serve-net's engine slot for several streams per connection; ALPN `h2` selects h2-net.
-- [ ] Priority signals (RFC 9218) surfaced to serve-net's scheduler (moved from v0.3.0).
-- [ ] Head pooling, decided with serve-net's engine slot (PLAN section 6).
+- [ ] serve-net's engine slot for several streams per connection; ALPN `h2` selects h2-net; serve-net's scheduler uses the priority signals. Waits on h2-net's first functional release: serve-net takes dependencies at published versions only, never by path.
+- [x] Head pooling: tried and rejected (PLAN section 6).
 
 ## v1.0.0 - Stable
 - [ ] Frozen after direct mode has served HTTP/2 in production.

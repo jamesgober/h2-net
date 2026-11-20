@@ -57,13 +57,13 @@ decoder.decode(&block, &mut fields).expect("a block this encoder wrote");
 assert_eq!(fields.get(":status"), Some(&b"200"[..]));
 ```
 
-- **Connection** (`h2_net::conn`): the server side of a connection. Feed it bytes and poll for events; requests arrive as http-net's `OwnedRequestHead`, built by writing the request out as HTTP/1.1 and parsing it with http-net, so both versions get the same type and the same strictness. It answers `SETTINGS` and `PING`, runs flow control in both directions, enforces RFC 9113's rules for requests (pseudo-headers, connection-specific fields, `content-length` against the body), and shuts down gracefully in RFC 9113's two steps. Every known HTTP/2 attack has a budget that ends the connection with `ENHANCE_YOUR_CALM` and marks it as abuse: rapid reset and resets the peer provokes, `CONTINUATION` floods, `SETTINGS` and `PING` floods, a peer that sends but never reads, and stream exhaustion. None of them needs a clock.
+- **Connection** (`h2_net::conn`): the server side of a connection. Feed it bytes and poll for events; requests arrive as http-net's `OwnedRequestHead`, built by writing the request out as HTTP/1.1 and parsing it with http-net, so both versions get the same type and the same strictness. It answers `SETTINGS` and `PING`, runs flow control in both directions, enforces RFC 9113's rules for requests (pseudo-headers, connection-specific fields, `content-length` against the body), and shuts down gracefully in RFC 9113's two steps. Every known HTTP/2 attack has a budget that ends the connection with `ENHANCE_YOUR_CALM` and marks it as abuse: rapid reset and resets the peer provokes, `CONTINUATION` floods, `SETTINGS` and `PING` floods, a peer that sends but never reads, and stream exhaustion. None of them needs a clock. Priority signals (RFC 9218) are read and reported with each request, for the driver's scheduler.
 
 The whole API is in [`docs/API.md`](./docs/API.md).
 
 ## Next
 
-serve-net's engine slot for several streams per connection, with ALPN `h2` selecting h2-net, and priority signals (RFC 9218) for its scheduler.
+serve-net's engine slot for several streams per connection, with ALPN `h2` selecting h2-net, and its scheduler using the priority signals.
 
 See [`dev/PLAN.md`](./dev/PLAN.md) for the design, the threats and what each defence costs, and the decision log.
 
