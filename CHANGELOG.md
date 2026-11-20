@@ -11,7 +11,12 @@
 
 ## [Unreleased]
 
-The codec (frames and HPACK) and the server connection.
+---
+
+## [0.3.0] - 2026-11-20
+
+The codec (frames and HPACK) and the server connection. The first functional
+release; the planned 0.2.0 (the codec alone) was not released on its own.
 
 ### Added
 
@@ -72,5 +77,6 @@ The scaffold and the plan. No functional code yet.
 - `dev/PLAN.md` (purpose, scope, architecture, threats, ecosystem, open
   decisions, decision log), `dev/DIRECTIVES.md`, and `dev/ROADMAP.md`.
 
-[Unreleased]: https://github.com/jamesgober/h2-net/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jamesgober/h2-net/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jamesgober/h2-net/releases/tag/v0.3.0
 [0.1.0]: https://github.com/jamesgober/h2-net/releases/tag/v0.1.0
