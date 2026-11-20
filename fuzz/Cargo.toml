@@ -45,3 +45,10 @@ path  = "fuzz_targets/huffman.rs"
 test  = false
 doc   = false
 bench = false
+
+[[bin]]
+name  = "server_conn"
+path  = "fuzz_targets/server_conn.rs"
+test  = false
+doc   = false
+bench = false

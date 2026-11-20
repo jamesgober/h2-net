@@ -50,8 +50,10 @@ default = []
 # DEPENDENCIES
 # #################################
 [dependencies]
-# None. The codec needs nothing from outside the crate; the connection
-# layer adds http-net (first party, published) for the mapping.
+# The request and response types HTTP/2 maps onto, and the HTTP/1.1 parser
+# the mapping runs through (first party, published; `no_std` with its
+# default features off).
+http-net = { version = "0.10", default-features = false }
 
 
 # DEV DEPENDENCIES

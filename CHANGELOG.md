@@ -11,7 +11,7 @@
 
 ## [Unreleased]
 
-The codec: frames and HPACK.
+The codec (frames and HPACK) and the server connection.
 
 ### Added
 
@@ -29,11 +29,25 @@ The codec: frames and HPACK.
   copied; a block over the budget keeps the dynamic table in step and is
   reported, so the request can be refused without closing the connection.
   The encoder never indexes credentials or fields marked sensitive.
-- `ErrorCode`, `FrameError`, `HpackError`.
+- `conn::ServerConn`: the server side of a connection, without I/O. It
+  answers `SETTINGS` and `PING`, runs flow control in both directions,
+  collects field blocks across `CONTINUATION`, checks requests by RFC 9113
+  section 8, and shuts down gracefully in two steps. Requests arrive as
+  http-net's `OwnedRequestHead` (the request written out as HTTP/1.1 and
+  parsed by http-net, so both versions are equally strict); responses go in
+  as status and fields, with HTTP/1.1's connection fields dropped.
+- Budgets against rapid reset and provoked resets, `CONTINUATION` floods,
+  `SETTINGS`, `PING`, and other control floods, a peer that does not read,
+  and stream exhaustion, each with an attack test. A request over the header
+  list budget is answered `431` without ending the connection.
+- `ErrorCode`, `FrameError`, `HpackError`, and the connection's errors.
 - Tests: RFC 7541 Appendix C byte for byte, a decode at every split point
   for every frame type, every refusal in RFC 9113 section 6. Fuzz targets
-  for the frame decoder, the HPACK decoder, the HPACK round trip, and the
-  Huffman code, with a smoke run in CI. Benchmarks.
+  for the frame decoder, the HPACK decoder, the HPACK round trip, the
+  Huffman code, and the server connection, with a smoke run in CI.
+  Benchmarks.
+- A dependency on http-net 0.10 (default features off; the crate stays
+  `no_std`).
 
 ### Changed
 

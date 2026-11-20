@@ -1,7 +1,7 @@
 # h2-net &mdash; API Reference
 
 > Every public item in `h2-net`, with examples. The examples run as tests.
-> **Status: in development.** The codec (`frame`, `hpack`) is built; the connection engine is next (see [`../dev/ROADMAP.md`](../dev/ROADMAP.md)).
+> **Status: in development.** The codec (`frame`, `hpack`) and the server connection (`conn`) are built (see [`../dev/ROADMAP.md`](../dev/ROADMAP.md)).
 
 <sub>Copyright &copy; 2026 <strong>James Gober</strong>.</sub>
 
@@ -10,6 +10,7 @@
 - [Crate root](#crate-root): `VERSION`, `ErrorCode`, `FrameError`, `HpackError`
 - [`frame`](#frame): `decode`, `encode`, `Decoded`, `Frame`, `FrameHeader`, `FrameType`, `StreamId`, `Priority`, `Settings`, `SettingId`, `SettingValues`, `settings_frame`, `flags`, constants
 - [`hpack`](#hpack): `Decoder`, `Encoder`, `HeaderList`, `HeaderField`, `huffman`, `FIELD_OVERHEAD`
+- [`conn`](#conn): `ServerConn`, `Config`, `Event`, `Scheme`, `SendError`, `ConnError`, `ConnErrorKind`, `Violation`, `Rejection`, `Malformed`
 
 ## Crate root
 
@@ -149,3 +150,80 @@ let mut wire = Vec::new();
 huffman::encode(b"no-cache", &mut wire);
 assert_eq!(wire, [0xa8, 0xeb, 0x10, 0x64, 0x9c, 0xbf]);
 ```
+
+## `conn`
+
+The server side of one HTTP/2 connection, without I/O.
+
+### `ServerConn`
+
+- `new(config)`: the server's `SETTINGS` and a connection `WINDOW_UPDATE` are in the output at once.
+- `feed(bytes) -> usize`: copies what fits into the input buffer (two maximum frames).
+- `poll() -> Result<Option<Event>, ConnError>`: the next event, or `None` when more input is needed. After an error, a `GOAWAY` is in the output and every call returns the same error.
+- `output()` and `consume_output(n)`: the bytes to write.
+- `send_headers(stream, status, fields, end_stream)`: a response head, or an informational `1xx`. Names are lowercased; `connection`, `keep-alive`, `proxy-connection`, `transfer-encoding`, and `upgrade` are dropped. `HEAD`, `204`, and `304` end with the head.
+- `send_data(stream, data, end_stream) -> usize`: as much as the windows and the output bound allow; `Event::Writable` follows when the rest can go. A `content-length` the head sent is enforced.
+- `send_trailers(stream, fields)`, `reset(stream, code)`.
+- `release(stream, n)`: gives request body bytes back to the peer's windows once dealt with.
+- `shutdown()`: graceful, in two steps; `close(code)`: at once.
+- `is_done()`, `settings_acked()`, `open_streams()`.
+
+```rust
+use h2_net::conn::{Config, Event, ServerConn};
+use h2_net::frame::{self, Frame, StreamId};
+use h2_net::hpack::{Encoder, HeaderField};
+
+let mut wire = frame::PREFACE.to_vec();
+frame::settings_frame(&[], 16_384, &mut wire)?;
+let mut block = Vec::new();
+Encoder::new(4096).encode(
+    [
+        HeaderField::new(b":method", b"POST"),
+        HeaderField::new(b":scheme", b"https"),
+        HeaderField::new(b":authority", b"example.com"),
+        HeaderField::new(b":path", b"/echo"),
+        HeaderField::new(b"content-length", b"5"),
+    ],
+    &mut block,
+);
+let stream = StreamId::new(1).unwrap();
+frame::encode(
+    &Frame::Headers { stream, end_stream: false, end_headers: true, priority: None, fragment: &block, padding: None },
+    16_384,
+    &mut wire,
+)?;
+frame::encode(&Frame::Data { stream, end_stream: true, data: b"hello", padding: None }, 16_384, &mut wire)?;
+
+let mut conn = ServerConn::new(Config::new());
+let _ = conn.feed(&wire);
+let mut body = Vec::new();
+while let Some(event) = conn.poll()? {
+    match event {
+        Event::Request { head, .. } => assert_eq!(head.view().content_length(), Some(5)),
+        Event::Data { stream, data, end_stream } => {
+            body.extend_from_slice(data);
+            let n = data.len();
+            conn.release(stream, n);
+            if end_stream {
+                conn.send_headers(stream, 200, &[("content-length", b"5")], false)?;
+                conn.send_data(stream, &body, true)?;
+            }
+        }
+        _ => {}
+    }
+}
+assert_eq!(body, b"hello");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+### `Config`
+
+Secure defaults, each setter documenting its cost: `max_concurrent_streams` (100), `stream_window` (256 KiB), `connection_window` (1 MiB), `max_frame_size` (16,384), `header_table_size` (4096), `max_header_list_size` (16 KiB; over it, `431`), `max_header_block` (64 KiB), `max_continuations` (32), `encoder_table_size` (4096), `reset_budget` (200, 4), `control_budget` (1000, 10), `max_unread_answers` (1000), `max_output` (256 KiB), `auto_release` (off).
+
+### `Event`
+
+`Request { stream, head, scheme, end_stream }` (`head` is http-net's `OwnedRequestHead`; its framing tells whether a body follows), `Data { stream, data, end_stream }`, `Trailers { stream, fields }`, `Reset { stream, code, remote }`, `Rejected { stream, reason }` (a request answered without the application: malformed, too large, or over the stream cap), `Writable { stream }`, `GoAway { code }`. `#[non_exhaustive]`.
+
+### Errors
+
+`ConnError` has `kind()`, `code()` (sent in the `GOAWAY`), and `is_abuse()` (a budget was crossed: what a connection gate counts). `ConnErrorKind`: `Preface`, `Frame`, `Hpack`, `Protocol(Violation)`, `FlowControl`, `StreamClosed`, `RapidReset`, `ContinuationFlood`, `HeaderBlockTooLarge`, `ControlFlood`, `OutputBacklog`, `Closed`. `SendError` refuses an application call and writes nothing. `Rejection` and `Malformed` say why a request never reached the application.
