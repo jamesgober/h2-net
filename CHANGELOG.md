@@ -11,6 +11,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- `conn::ClientConn`, the client side of a connection: the same protocol
+  and budgets as the server side, server push refused, responses checked by
+  RFC 9113 section 8.3, and the streams a `GOAWAY` left unprocessed
+  reported as reset with `REFUSED_STREAM`. `RequestParts` describes a
+  request head; `Event::Response` and `Event::Informational` report
+  responses.
+- A fuzz target for the client with a hostile server.
+
+### Changed
+
+- `ServerConn` is now `Connection<Server>`, an alias; nothing a server's
+  code calls changed.
+
 ---
 
 ## [0.3.0] - 2026-11-20

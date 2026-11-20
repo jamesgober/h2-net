@@ -368,10 +368,33 @@ pub enum Event<'a> {
         /// The stream.
         stream: StreamId,
     },
-    /// The peer sent `GOAWAY`: it opens no more streams.
+    /// The peer sent `GOAWAY`: it opens no more streams. On a client, every
+    /// stream above the one it names was not processed, and is reported as
+    /// [`Event::Reset`] with `REFUSED_STREAM` (safe to retry).
     GoAway {
         /// The code it sent.
         code: ErrorCode,
+    },
+    /// Client: a final response head. `fields` holds every field,
+    /// `:status` first. `end_stream` means no body follows.
+    Response {
+        /// The stream.
+        stream: StreamId,
+        /// The status.
+        status: u16,
+        /// The fields, checked by RFC 9113 section 8.
+        fields: &'a HeaderList,
+        /// No body follows.
+        end_stream: bool,
+    },
+    /// Client: an informational (`1xx`) response head; the final one follows.
+    Informational {
+        /// The stream.
+        stream: StreamId,
+        /// The status, `100` to `199` (never `101`).
+        status: u16,
+        /// The fields, `:status` first.
+        fields: &'a HeaderList,
     },
 }
 
@@ -394,6 +417,12 @@ pub enum SendError {
     Body,
     /// The connection is closed.
     Closed,
+    /// Client: the peer's `SETTINGS_MAX_CONCURRENT_STREAMS` is reached; send
+    /// once a stream ends.
+    Busy,
+    /// Client: the connection is going away (a `GOAWAY` either way); open a
+    /// new one.
+    GoingAway,
 }
 
 impl core::fmt::Display for SendError {
@@ -406,6 +435,8 @@ impl core::fmt::Display for SendError {
             Self::Field(_) => "field not allowed in HTTP/2",
             Self::Body => "body not allowed or of the wrong length",
             Self::Closed => "the connection is closed",
+            Self::Busy => "the peer's stream limit is reached",
+            Self::GoingAway => "the connection is going away",
         })
     }
 }
@@ -438,6 +469,8 @@ struct Stream {
     send_window: i64,
     wants_write: bool,
     priority: PriorityParams,
+    /// Client: the final status received; `None` until the response head.
+    response_status: Option<u16>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -473,13 +506,60 @@ enum Step {
         end_stream: bool,
     },
     Trailers(StreamId),
+    Response {
+        stream: StreamId,
+        status: u16,
+        end_stream: bool,
+    },
+    Informational {
+        stream: StreamId,
+        status: u16,
+    },
 }
 
 const SHUTDOWN_PING: [u8; 8] = *b"h2-net\x00\x01";
 
-/// One server-side HTTP/2 connection.
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::Server {}
+    impl Sealed for super::Client {}
+}
+
+/// Which side of a connection this is: [`Server`] or [`Client`]. Sealed.
+pub trait Role: sealed::Sealed + core::fmt::Debug + Send + Sync + 'static {
+    /// Whether this side opened the connection.
+    const CLIENT: bool;
+}
+
+/// The server side: it accepts streams.
 #[derive(Debug)]
-pub struct ServerConn {
+pub enum Server {}
+
+/// The client side: it opens streams.
+#[derive(Debug)]
+pub enum Client {}
+
+impl Role for Server {
+    const CLIENT: bool = false;
+}
+
+impl Role for Client {
+    const CLIENT: bool = true;
+}
+
+/// The server side of a connection: see [`Connection`].
+pub type ServerConn = Connection<Server>;
+
+/// The client side of a connection: see [`Connection`].
+pub type ClientConn = Connection<Client>;
+
+/// One HTTP/2 connection, [`ServerConn`] or [`ClientConn`]. Both sides share
+/// the protocol (settings, `PING`, flow control, field blocks, `GOAWAY`) and
+/// every budget; the server accepts requests and answers them with
+/// [`send_headers`](Connection::send_headers), the client opens them with
+/// [`send_request`](Connection::send_request).
+#[derive(Debug)]
+pub struct Connection<R: Role> {
     config: Config,
     state: State,
     input: Vec<u8>,
@@ -518,6 +598,9 @@ pub struct ServerConn {
     /// `PRIORITY_UPDATE`s for streams not yet opened (at most the stream
     /// cap of them).
     pending_priority: BTreeMap<u32, PriorityParams>,
+    /// The client's next stream identifier (odd, from 1).
+    next_stream: u32,
+    role: core::marker::PhantomData<R>,
 }
 
 #[derive(Debug)]
@@ -545,15 +628,18 @@ enum Queued {
 
 type Fail = ConnErrorKind;
 
-impl ServerConn {
+impl<R: Role> Connection<R> {
     /// A connection that has accepted a socket (after TLS and ALPN `h2`,
     /// or behind a trusted proxy for cleartext). Its `SETTINGS` are already
     /// in [`output`](Self::output): the server preface needs no wait.
-    #[must_use]
-    pub fn new(config: Config) -> Self {
+    fn with_config(config: Config) -> Self {
         let mut conn = Self {
             config,
-            state: State::Preface,
+            state: if R::CLIENT {
+                State::FirstSettings
+            } else {
+                State::Preface
+            },
             input: Vec::new(),
             start: 0,
             pending_consume: 0,
@@ -593,6 +679,8 @@ impl ServerConn {
             events: VecDeque::new(),
             error: None,
             pending_priority: BTreeMap::new(),
+            next_stream: 1,
+            role: core::marker::PhantomData,
         };
         conn.send_preface();
         conn
@@ -601,7 +689,13 @@ impl ServerConn {
     fn send_preface(&mut self) {
         let c = self.config;
         let mut params = Vec::with_capacity(6);
-        params.push((SettingId::MAX_CONCURRENT_STREAMS, c.max_concurrent_streams));
+        if R::CLIENT {
+            // The client speaks first, and refuses server push.
+            self.out.extend_from_slice(PREFACE);
+            params.push((SettingId::ENABLE_PUSH, 0));
+        } else {
+            params.push((SettingId::MAX_CONCURRENT_STREAMS, c.max_concurrent_streams));
+        }
         params.push((SettingId::MAX_HEADER_LIST_SIZE, c.max_header_list_size));
         params.push((SettingId::NO_RFC7540_PRIORITIES, 1));
         if c.stream_window != 65_535 {
@@ -730,6 +824,25 @@ impl ServerConn {
                         fields: &self.list,
                     }));
                 }
+                Step::Response {
+                    stream,
+                    status,
+                    end_stream,
+                } => {
+                    return Ok(Some(Event::Response {
+                        stream,
+                        status,
+                        fields: &self.list,
+                        end_stream,
+                    }));
+                }
+                Step::Informational { stream, status } => {
+                    return Ok(Some(Event::Informational {
+                        stream,
+                        status,
+                        fields: &self.list,
+                    }));
+                }
                 Step::Nothing => {}
             }
             if let Some(q) = self.events.pop_front() {
@@ -809,6 +922,20 @@ impl ServerConn {
         if matches!(self.state, State::Closed | State::Draining { .. }) {
             return;
         }
+        if R::CLIENT {
+            // A client accepts no streams, so one GOAWAY says it all; its own
+            // streams finish.
+            self.write_frame(&Frame::GoAway {
+                last_stream: StreamId::ZERO,
+                code: ErrorCode::NO_ERROR,
+                debug: b"",
+            });
+            self.state = State::Draining {
+                last: 0,
+                ping_acked: true,
+            };
+            return;
+        }
         self.write_frame(&Frame::GoAway {
             last_stream: StreamId::MAX,
             code: ErrorCode::NO_ERROR,
@@ -822,6 +949,15 @@ impl ServerConn {
             last: StreamId::MAX.value(),
             ping_acked: false,
         };
+    }
+
+    /// Whether `id` names a stream that was never opened.
+    fn is_idle(&self, id: u32) -> bool {
+        if R::CLIENT {
+            id % 2 == 0 || id >= self.next_stream
+        } else {
+            id > self.last_peer_stream
+        }
     }
 
     fn write_frame(&mut self, f: &Frame<'_>) {
@@ -927,7 +1063,7 @@ impl ServerConn {
                     return Err(ConnErrorKind::Protocol(Violation::ContinuationExpected));
                 }
                 self.start += len;
-                if stream.value() > self.last_peer_stream && error == FrameError::ZeroIncrement {
+                if self.is_idle(stream.value()) && error == FrameError::ZeroIncrement {
                     return Err(ConnErrorKind::Protocol(Violation::IdleStream {
                         kind: frame::FrameType::WINDOW_UPDATE,
                         stream,
@@ -984,7 +1120,7 @@ impl ServerConn {
                         self.charge_control()?;
                         return Ok(Step::Nothing);
                     }
-                    if stream.value() > self.last_peer_stream {
+                    if self.is_idle(stream.value()) {
                         return Err(ConnErrorKind::Protocol(Violation::IdleStream {
                             kind: frame::FrameType::DATA,
                             stream,
@@ -995,6 +1131,13 @@ impl ServerConn {
                 if s.peer_ended {
                     self.release_connection(u32::try_from(flow).unwrap_or(0));
                     self.reset_for_peer(stream, ErrorCode::STREAM_CLOSED, true)?;
+                    return Ok(Step::Nothing);
+                }
+                // A response body before its head, or on a response that has
+                // none (to HEAD, or 204 or 304), is malformed.
+                if R::CLIENT && (s.response_status.is_none() || (s.bodiless && !data.is_empty())) {
+                    self.release_connection(u32::try_from(flow).unwrap_or(0));
+                    self.reset_for_peer(stream, ErrorCode::PROTOCOL_ERROR, true)?;
                     return Ok(Step::Nothing);
                 }
                 s.recv_window -= flow;
@@ -1080,6 +1223,10 @@ impl ServerConn {
             }
             Frame::PriorityUpdate { prioritized, field } => {
                 self.charge_control()?;
+                if R::CLIENT {
+                    // RFC 9218 section 7.1: only clients send it.
+                    return Err(ConnErrorKind::Protocol(Violation::PriorityUpdate));
+                }
                 if !prioritized.is_client_initiated() {
                     // A server never pushes, so an even stream is wrong
                     // (RFC 9218 section 7.1).
@@ -1108,7 +1255,7 @@ impl ServerConn {
                 Ok(Step::Nothing)
             }
             Frame::RstStream { stream, code } => {
-                if stream.value() > self.last_peer_stream {
+                if self.is_idle(stream.value()) {
                     return Err(ConnErrorKind::Protocol(Violation::IdleStream {
                         kind: frame::FrameType::RST_STREAM,
                         stream,
@@ -1119,7 +1266,7 @@ impl ServerConn {
                         // Body bytes the application still held go back to
                         // the connection window.
                         self.release_connection(s.held);
-                        if !s.local_ended {
+                        if !s.local_ended && !R::CLIENT {
                             self.charge_reset()?;
                         }
                         self.events.push_back(Queued::Reset {
@@ -1197,12 +1344,31 @@ impl ServerConn {
                 }
                 Ok(Step::Nothing)
             }
-            Frame::GoAway { code, .. } => {
+            Frame::GoAway {
+                code, last_stream, ..
+            } => {
                 if !self.peer_goaway {
                     self.peer_goaway = true;
                     self.events.push_back(Queued::GoAway(code));
                 } else {
                     self.charge_control()?;
+                }
+                if R::CLIENT {
+                    let unprocessed: Vec<u32> = self
+                        .streams
+                        .range(last_stream.value().saturating_add(1)..)
+                        .map(|(id, _)| *id)
+                        .collect();
+                    for id in unprocessed {
+                        if let Some(s) = self.streams.remove(&id) {
+                            self.release_connection(s.held);
+                            self.events.push_back(Queued::Reset {
+                                stream: StreamId::masked(id),
+                                code: ErrorCode::REFUSED_STREAM,
+                                remote: true,
+                            });
+                        }
+                    }
                 }
                 Ok(Step::Nothing)
             }
@@ -1228,7 +1394,7 @@ impl ServerConn {
                     }
                     return Ok(Step::Nothing);
                 }
-                if stream.value() > self.last_peer_stream {
+                if self.is_idle(stream.value()) {
                     return Err(ConnErrorKind::Protocol(Violation::IdleStream {
                         kind: frame::FrameType::WINDOW_UPDATE,
                         stream,
@@ -1279,6 +1445,9 @@ impl ServerConn {
         let decoded = self.decoder.decode(&block, &mut self.list);
         self.block = block;
         decoded.map_err(ConnErrorKind::Hpack)?;
+        if R::CLIENT {
+            return self.response_block(stream, end_stream);
+        }
 
         let id = stream.value();
         if self.streams.contains_key(&id) {
@@ -1335,6 +1504,7 @@ impl ServerConn {
             send_window: i64::from(self.peer.initial_window_size),
             wants_write: false,
             priority: PriorityParams::default(),
+            response_status: None,
         };
         if self.list.is_oversized() {
             // Answered here; the application never sees it.
@@ -1343,7 +1513,7 @@ impl ServerConn {
                 stream,
                 reason: Rejection::HeadersTooLarge,
             });
-            let _ = self.send_headers(stream, 431, &[], true);
+            let _ = self.send_head(stream, 431, &[], true);
             if !end_stream {
                 // Ask the client to stop sending the body (RFC 9113 8.1).
                 self.reset_for_peer(stream, ErrorCode::NO_ERROR, false)?;
@@ -1385,6 +1555,84 @@ impl ServerConn {
         Ok(Step::Nothing)
     }
 
+    /// Client: a field block on one of this side's streams: a response
+    /// head (informational or final) or trailers.
+    fn response_block(&mut self, stream: StreamId, end_stream: bool) -> Result<Step, Fail> {
+        let id = stream.value();
+        let Some(s) = self.streams.get(&id) else {
+            if self.recent_resets.contains(&id) {
+                self.charge_control()?;
+                return Ok(Step::Nothing);
+            }
+            if self.is_idle(id) {
+                return Err(ConnErrorKind::Protocol(Violation::IdleStream {
+                    kind: frame::FrameType::HEADERS,
+                    stream,
+                }));
+            }
+            return Err(ConnErrorKind::StreamClosed { stream });
+        };
+        if s.peer_ended {
+            self.reset_for_peer(stream, ErrorCode::STREAM_CLOSED, true)?;
+            return Ok(Step::Nothing);
+        }
+        let reject = |this: &mut Self, reason: Rejection| -> Result<Step, Fail> {
+            this.events.push_back(Queued::Rejected { stream, reason });
+            this.reset_for_peer(stream, ErrorCode::PROTOCOL_ERROR, true)?;
+            Ok(Step::Nothing)
+        };
+        if self.list.is_oversized() {
+            return reject(self, Rejection::HeadersTooLarge);
+        }
+        if s.response_status.is_some() {
+            // Trailers: they end the stream.
+            if !end_stream {
+                return reject(self, Rejection::Malformed(Malformed::TrailersWithoutEnd));
+            }
+            if s.content_length.is_some_and(|cl| cl != s.received) {
+                return reject(self, Rejection::Malformed(Malformed::ContentLength));
+            }
+            if let Err(m) = fields::check_trailers(&self.list) {
+                return reject(self, Rejection::Malformed(m));
+            }
+            if let Some(s) = self.streams.get_mut(&id) {
+                s.peer_ended = true;
+            }
+            self.close_if_done(stream);
+            return Ok(Step::Trailers(stream));
+        }
+        let (status, content_length) = match fields::check_response(&self.list) {
+            Ok(v) => v,
+            Err(m) => return reject(self, Rejection::Malformed(m)),
+        };
+        if status < 200 {
+            if end_stream || status == 101 {
+                return reject(self, Rejection::Malformed(Malformed::Status));
+            }
+            return Ok(Step::Informational { stream, status });
+        }
+        let is_head = s.is_head;
+        let bodiless = is_head || status == 204 || status == 304;
+        if end_stream && !bodiless && content_length.is_some_and(|n| n > 0) {
+            return reject(self, Rejection::Malformed(Malformed::ContentLength));
+        }
+        self.work = self.work.saturating_add(1);
+        if let Some(s) = self.streams.get_mut(&id) {
+            s.response_status = Some(status);
+            s.bodiless = bodiless;
+            // A HEAD response's content-length describes a body it does not
+            // carry.
+            s.content_length = if bodiless { Some(0) } else { content_length };
+            s.peer_ended = end_stream;
+        }
+        self.close_if_done(stream);
+        Ok(Step::Response {
+            stream,
+            status,
+            end_stream,
+        })
+    }
+
     /// The `priority` field of the request just decoded; several fields
     /// are one dictionary, joined with commas (RFC 8941 section 3.2).
     fn field_priority(&self) -> PriorityParams {
@@ -1402,12 +1650,6 @@ impl ServerConn {
             joined.extend_from_slice(f.value);
         }
         PriorityParams::parse(&joined)
-    }
-
-    /// The current priority of an open stream.
-    #[must_use]
-    pub fn priority(&self, stream: StreamId) -> Option<PriorityParams> {
-        self.streams.get(&stream.value()).map(|s| s.priority)
     }
 
     fn trailers(&mut self, stream: StreamId, end_stream: bool) -> Result<Step, Fail> {
@@ -1492,18 +1734,9 @@ impl ServerConn {
         self.release_connection(n);
     }
 
-    /// Sends a response head (or an informational `1xx` head, which may
-    /// come more than once before the final one). `fields` are regular
-    /// fields; names are lowercased, and the fields HTTP/2 forbids
-    /// (`connection`, `keep-alive`, `proxy-connection`,
-    /// `transfer-encoding`, `upgrade`) are dropped, so an HTTP/1.1
-    /// response maps across as it is. `end_stream` means no body follows;
-    /// it is forced for a `HEAD` request and for `204` and `304`.
-    ///
-    /// # Errors
-    ///
-    /// A [`SendError`]; nothing is written.
-    pub fn send_headers(
+    /// The server's response head (`send_headers`, and the connection's
+    /// own `431`).
+    fn send_head(
         &mut self,
         stream: StreamId,
         status: u16,
@@ -1772,5 +2005,232 @@ impl ServerConn {
     }
 }
 
+impl Connection<Server> {
+    /// A connection that has accepted a socket (after TLS and ALPN `h2`,
+    /// or behind a trusted proxy for cleartext). Its `SETTINGS` are already
+    /// in [`output`](Self::output): the server preface needs no wait.
+    #[must_use]
+    pub fn new(config: Config) -> Self {
+        Self::with_config(config)
+    }
+
+    /// The current priority of an open stream.
+    #[must_use]
+    pub fn priority(&self, stream: StreamId) -> Option<PriorityParams> {
+        self.streams.get(&stream.value()).map(|s| s.priority)
+    }
+
+    /// Sends a response head (or an informational `1xx` head, which may
+    /// come more than once before the final one). `fields` are regular
+    /// fields; names are lowercased, and the fields HTTP/2 forbids
+    /// (`connection`, `keep-alive`, `proxy-connection`,
+    /// `transfer-encoding`, `upgrade`) are dropped, so an HTTP/1.1
+    /// response maps across as it is. `end_stream` means no body follows;
+    /// it is forced for a `HEAD` request and for `204` and `304`.
+    ///
+    /// # Errors
+    ///
+    /// A [`SendError`]; nothing is written.
+    pub fn send_headers(
+        &mut self,
+        stream: StreamId,
+        status: u16,
+        fields: &[(&str, &[u8])],
+        end_stream: bool,
+    ) -> Result<(), SendError> {
+        self.send_head(stream, status, fields, end_stream)
+    }
+}
+
+impl Connection<Client> {
+    /// A connection that has just connected (after TLS and ALPN `h2`). The
+    /// client preface and its `SETTINGS` (server push refused) are already
+    /// in [`output`](Self::output): requests can follow at once.
+    #[must_use]
+    pub fn new(config: Config) -> Self {
+        Self::with_config(config)
+    }
+
+    /// Opens a stream with a request head; returns its identifier. Names
+    /// are lowercased; `host` and the fields HTTP/2 forbids (`connection`,
+    /// `keep-alive`, `proxy-connection`, `transfer-encoding`, `upgrade`)
+    /// are dropped, since `:authority` carries the host. `end_stream` means
+    /// no body follows; otherwise send it with
+    /// [`send_data`](Connection::send_data), whose total must match a
+    /// `content-length` given here.
+    ///
+    /// # Errors
+    ///
+    /// A [`SendError`]; nothing is written. [`SendError::Busy`] at the
+    /// peer's stream limit, [`SendError::GoingAway`] after a `GOAWAY`.
+    pub fn send_request(
+        &mut self,
+        request: &RequestParts<'_>,
+        end_stream: bool,
+    ) -> Result<StreamId, SendError> {
+        match self.state {
+            State::Closed => return Err(SendError::Closed),
+            State::Draining { .. } => return Err(SendError::GoingAway),
+            _ if self.peer_goaway => return Err(SendError::GoingAway),
+            _ => {}
+        }
+        let Some(stream) = StreamId::new(self.next_stream) else {
+            return Err(SendError::GoingAway);
+        };
+        let limit = self
+            .peer
+            .max_concurrent_streams
+            .map_or(usize::MAX, |n| n as usize);
+        if self.streams.len() >= limit {
+            return Err(SendError::Busy);
+        }
+        let method = request.method.as_bytes();
+        let token = |b: &u8| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        };
+        if method.is_empty() || !method.iter().all(token) {
+            return Err(SendError::Field(Malformed::MissingPseudo));
+        }
+        let connect = method == b"CONNECT";
+        let authority = request.authority.as_bytes();
+        if authority.is_empty() || authority.contains(&b'@') {
+            return Err(SendError::Field(Malformed::Authority));
+        }
+        fields::check_value(authority).map_err(SendError::Field)?;
+        let path = request.path.as_bytes();
+        let origin_form = path.first() == Some(&b'/') || (path == b"*" && method == b"OPTIONS");
+        if !connect && !origin_form {
+            return Err(SendError::Field(Malformed::Path));
+        }
+        fields::check_value(path).map_err(SendError::Field)?;
+
+        let mut names = core::mem::take(&mut self.scratch_fields);
+        names.clear();
+        let mut spans = Vec::with_capacity(request.fields.len());
+        let mut send_length = None;
+        for (name, value) in request.fields {
+            let name = name.as_bytes();
+            if fields::is_connection_specific(name) || name.eq_ignore_ascii_case(b"host") {
+                continue;
+            }
+            let start = names.len();
+            names.extend(name.iter().map(u8::to_ascii_lowercase));
+            let lower = names.get(start..).unwrap_or_default();
+            if let Err(e) = fields::check_regular(&HeaderField::new(lower, value)) {
+                self.scratch_fields = names;
+                return Err(SendError::Field(e));
+            }
+            if lower == b"content-length" {
+                send_length = core::str::from_utf8(value)
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok());
+                if send_length.is_none() {
+                    self.scratch_fields = names;
+                    return Err(SendError::Field(Malformed::ContentLength));
+                }
+            }
+            spans.push((start, names.len(), *value));
+        }
+        if end_stream && send_length.is_some_and(|n| n > 0) {
+            self.scratch_fields = names;
+            return Err(SendError::Body);
+        }
+        let scheme = request.scheme.as_str().as_bytes();
+        let mut pseudo: Vec<HeaderField<'_>> = Vec::with_capacity(4);
+        pseudo.push(HeaderField::new(b":method", method));
+        if !connect {
+            pseudo.push(HeaderField::new(b":scheme", scheme));
+        }
+        pseudo.push(HeaderField::new(b":authority", authority));
+        if !connect {
+            pseudo.push(HeaderField::new(b":path", path));
+        }
+        let mut block = core::mem::take(&mut self.block);
+        block.clear();
+        self.encoder.encode(
+            pseudo.into_iter().chain(
+                spans
+                    .iter()
+                    .map(|(a, b, v)| HeaderField::new(names.get(*a..*b).unwrap_or_default(), v)),
+            ),
+            &mut block,
+        );
+        self.write_block(stream, &block, end_stream);
+        self.block = block;
+        self.scratch_fields = names;
+        self.next_stream = self.next_stream.saturating_add(2);
+        let s = Stream {
+            peer_ended: false,
+            local_ended: end_stream,
+            // The head left: a body may follow.
+            responded: true,
+            bodiless: false,
+            is_head: method == b"HEAD",
+            content_length: None,
+            received: 0,
+            send_length,
+            sent: 0,
+            recv_window: i64::from(self.config.stream_window),
+            held: 0,
+            unreleased: 0,
+            send_window: i64::from(self.peer.initial_window_size),
+            wants_write: false,
+            priority: PriorityParams::default(),
+            response_status: None,
+        };
+        let _ = self.streams.insert(stream.value(), s);
+        Ok(stream)
+    }
+}
+
+/// A request head for [`ClientConn::send_request`].
+///
+/// # Examples
+///
+/// ```
+/// use h2_net::conn::{RequestParts, Scheme};
+///
+/// let head = RequestParts {
+///     method: "GET",
+///     scheme: Scheme::Https,
+///     authority: "example.com",
+///     path: "/index.html",
+///     fields: &[("accept", b"text/html")],
+/// };
+/// assert_eq!(head.path, "/index.html");
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct RequestParts<'a> {
+    /// The method (`CONNECT` sends no `:scheme` or `:path`).
+    pub method: &'a str,
+    /// The scheme.
+    pub scheme: Scheme,
+    /// The authority (`host[:port]`, no userinfo).
+    pub authority: &'a str,
+    /// The path and query, starting with `/` (`*` for `OPTIONS`).
+    pub path: &'a str,
+    /// The regular fields.
+    pub fields: &'a [(&'a str, &'a [u8])],
+}
+
+#[cfg(test)]
+mod client_tests;
 #[cfg(test)]
 mod tests;

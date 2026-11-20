@@ -259,6 +259,48 @@ pub(crate) fn map_request(
     })
 }
 
+/// Checks a response head: one `:status` of three digits first, no other
+/// pseudo-header, the regular field rules; returns the status and the
+/// `content-length`, when there is one.
+pub(crate) fn check_response(list: &HeaderList) -> Result<(u16, Option<u64>), Malformed> {
+    let mut status = None;
+    let mut regular = false;
+    let mut content_length = None;
+    for f in list.iter() {
+        if f.name.first() == Some(&b':') {
+            if regular {
+                return Err(Malformed::PseudoOrder);
+            }
+            if f.name != b":status" {
+                return Err(Malformed::UnknownPseudo);
+            }
+            if status.is_some() {
+                return Err(Malformed::PseudoOrder);
+            }
+            let digits = f.value.len() == 3 && f.value.iter().all(u8::is_ascii_digit);
+            let value = core::str::from_utf8(f.value)
+                .ok()
+                .and_then(|v| v.parse::<u16>().ok())
+                .filter(|v| digits && (100..=599).contains(v));
+            status = Some(value.ok_or(Malformed::Status)?);
+            continue;
+        }
+        regular = true;
+        check_regular(&f)?;
+        if f.name == b"content-length" {
+            let n = core::str::from_utf8(f.value)
+                .ok()
+                .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|v| v.parse::<u64>().ok())
+                .ok_or(Malformed::ContentLength)?;
+            if content_length.replace(n).is_some() {
+                return Err(Malformed::ContentLength);
+            }
+        }
+    }
+    Ok((status.ok_or(Malformed::Status)?, content_length))
+}
+
 /// Whether a response field is one this side drops when it maps an
 /// HTTP/1.1 response onto HTTP/2 (section 8.2.2: an intermediary removes
 /// them).

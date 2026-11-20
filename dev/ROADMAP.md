@@ -31,7 +31,9 @@ The design lock of 0.2.0 now covers the codec only; the connection API moves to 
 - [x] Priority signals (RFC 9218): read and reported to the driver (moved here from v0.4.0's list once built; the scheduling stays serve-net's).
 - [x] Released: tagged v0.3.0 on GitHub, 2026-11-20. The first crates.io publish waits on James.
 
-## v0.4.0 - In serve-net
+## v0.4.0 - Client, and in serve-net
+- [x] The client side: `ClientConn`, sharing the protocol and the budgets with the server side (D-015); tests against the server side in memory; a fuzz target with a hostile server.
+- [ ] A response head as http-net's type, once http-net has an owned response head (asked of http-net).
 - [ ] serve-net's engine slot for several streams per connection; ALPN `h2` selects h2-net; serve-net's scheduler uses the priority signals. Waits on h2-net's first functional release: serve-net takes dependencies at published versions only, never by path.
 - [x] Head pooling: tried and rejected (PLAN section 6).
 

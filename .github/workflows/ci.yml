@@ -81,7 +81,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [frame_decode, hpack_decode, hpack_round_trip, huffman, server_conn, priority]
+        target: [frame_decode, hpack_decode, hpack_round_trip, huffman, server_conn, priority, client_conn]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master

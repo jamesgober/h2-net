@@ -10,7 +10,7 @@
 - [Crate root](#crate-root): `VERSION`, `ErrorCode`, `FrameError`, `HpackError`
 - [`frame`](#frame): `decode`, `encode`, `Decoded`, `Frame`, `FrameHeader`, `FrameType`, `StreamId`, `Priority`, `Settings`, `SettingId`, `SettingValues`, `settings_frame`, `flags`, constants
 - [`hpack`](#hpack): `Decoder`, `Encoder`, `HeaderList`, `HeaderField`, `huffman`, `FIELD_OVERHEAD`
-- [`conn`](#conn): `ServerConn`, `Config`, `Event`, `Scheme`, `PriorityParams`, `SendError`, `ConnError`, `ConnErrorKind`, `Violation`, `Rejection`, `Malformed`
+- [`conn`](#conn): `ServerConn`, `ClientConn`, `Connection`, `Role`, `RequestParts`, `Config`, `Event`, `Scheme`, `PriorityParams`, `SendError`, `ConnError`, `ConnErrorKind`, `Violation`, `Rejection`, `Malformed`
 
 ## Crate root
 
@@ -213,6 +213,42 @@ while let Some(event) = conn.poll()? {
     }
 }
 assert_eq!(body, b"hello");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+### `ClientConn`
+
+The client side: the same `Connection` with the `Client` role. `new(config)` writes the client preface and `SETTINGS` (server push refused). `send_request(&RequestParts, end_stream)` opens the next odd stream and returns it; `send_data`, `send_trailers`, `release`, `reset`, `shutdown`, `feed`, `poll`, and `output` work as on the server. Responses arrive as `Event::Informational` and `Event::Response { stream, status, fields, end_stream }`, then `Event::Data` and `Event::Trailers`. `SendError::Busy` at the peer's stream limit; `SendError::GoingAway` after a `GOAWAY`, when every stream the server did not process is reported as `Event::Reset` with `REFUSED_STREAM`.
+
+```rust
+use h2_net::conn::{ClientConn, Config, Event, RequestParts, Scheme, ServerConn};
+
+let mut client = ClientConn::new(Config::new());
+let mut server = ServerConn::new(Config::new());
+let stream = client.send_request(
+    &RequestParts { method: "GET", scheme: Scheme::Https, authority: "example.com", path: "/", fields: &[] },
+    true,
+)?;
+// In a real program these bytes cross a socket.
+let mut status = None;
+for _ in 0..4 {
+    let out = client.output().to_vec();
+    client.consume_output(server.feed(&out));
+    while let Some(event) = server.poll()? {
+        if let Event::Request { stream, .. } = event {
+            server.send_headers(stream, 204, &[], true)?;
+        }
+    }
+    let out = server.output().to_vec();
+    server.consume_output(client.feed(&out));
+    while let Some(event) = client.poll()? {
+        if let Event::Response { status: s, .. } = event {
+            status = Some(s);
+        }
+    }
+}
+assert_eq!(status, Some(204));
+# let _ = stream;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
