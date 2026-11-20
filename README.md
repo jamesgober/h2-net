@@ -29,7 +29,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>. <code>no_std</code> with <code>alloc</code>. No runtime dependencies.
     </p>
     <blockquote>
-        <strong>Status: in development.</strong> The codec (frames and HPACK) is built and tested; the connection engine (streams, flow control, budgets) is next. The schedule is in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>.
+        <strong>Status: in development.</strong> The codec (frames and HPACK) and the server connection engine are built and tested; serve-net's side (ALPN `h2`, several streams per connection) is next. The schedule is in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>.
     </blockquote>
 </div>
 
@@ -57,11 +57,13 @@ decoder.decode(&block, &mut fields).expect("a block this encoder wrote");
 assert_eq!(fields.get(":status"), Some(&b"200"[..]));
 ```
 
+- **Connection** (`h2_net::conn`): the server side of a connection. Feed it bytes and poll for events; requests arrive as http-net's `OwnedRequestHead`, built by writing the request out as HTTP/1.1 and parsing it with http-net, so both versions get the same type and the same strictness. It answers `SETTINGS` and `PING`, runs flow control in both directions, enforces RFC 9113's rules for requests (pseudo-headers, connection-specific fields, `content-length` against the body), and shuts down gracefully in RFC 9113's two steps. Every known HTTP/2 attack has a budget that ends the connection with `ENHANCE_YOUR_CALM` and marks it as abuse: rapid reset and resets the peer provokes, `CONTINUATION` floods, `SETTINGS` and `PING` floods, a peer that sends but never reads, and stream exhaustion. None of them needs a clock.
+
 The whole API is in [`docs/API.md`](./docs/API.md).
 
 ## Next
 
-Streams, flow control, settings, `GOAWAY` and graceful shutdown, priority signals (RFC 9218), and the budgets against HTTP/2's known attacks (rapid reset, `CONTINUATION` floods, settings and ping floods, stream exhaustion). Requests and responses map to the same types http-net produces, so serve-net and web-net do not care which version arrived.
+serve-net's engine slot for several streams per connection, with ALPN `h2` selecting h2-net, and priority signals (RFC 9218) for its scheduler.
 
 See [`dev/PLAN.md`](./dev/PLAN.md) for the design, the threats and what each defence costs, and the decision log.
 

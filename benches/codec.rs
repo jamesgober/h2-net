@@ -12,10 +12,15 @@
 //! - `hpack/bomb`: a 1,000-byte block of indexed fields that each name a
 //!   4,000-byte entry, against a 16 KiB budget.
 //! - `huffman/decode_1k` and `huffman/encode_1k`: a 1 KiB cookie-like value.
+//! - `conn/requests_10k`: 10,000 browser-sized GET requests on one
+//!   connection, each answered with a head and a 1 KiB body, the output read
+//!   after each: the whole server path (frames, HPACK both ways, the
+//!   mapping onto http-net, flow control).
 
 use std::hint::black_box;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use h2_net::conn::{Config, Event, ServerConn};
 use h2_net::frame::{self, Decoded, Frame, StreamId};
 use h2_net::hpack::{Decoder, Encoder, HeaderField, HeaderList, huffman};
 
@@ -220,5 +225,75 @@ fn bench_huffman(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_frames, bench_hpack, bench_huffman);
+fn bench_conn(c: &mut Criterion) {
+    let mut g = c.benchmark_group("conn");
+    let mut enc = Encoder::new(4096);
+    let mut wire = frame::PREFACE.to_vec();
+    frame::settings_frame(&[], 16_384, &mut wire).unwrap();
+    // A large window, so the responses never wait.
+    frame::encode(
+        &Frame::WindowUpdate {
+            stream: StreamId::ZERO,
+            increment: frame::MAX_WINDOW - 65_535,
+        },
+        16_384,
+        &mut wire,
+    )
+    .unwrap();
+    for i in 0..10_000u32 {
+        let mut block = Vec::new();
+        enc.encode(fields(REQUEST), &mut block);
+        frame::encode(
+            &Frame::Headers {
+                stream: sid(2 * i + 1),
+                end_stream: true,
+                end_headers: true,
+                priority: None,
+                fragment: &block,
+                padding: None,
+            },
+            16_384,
+            &mut wire,
+        )
+        .unwrap();
+    }
+    let body = vec![0x41u8; 1024];
+    let resp: Vec<(&str, &[u8])> = RESPONSE
+        .iter()
+        .skip(1)
+        .map(|(n, v)| (std::str::from_utf8(n).unwrap(), &v[..]))
+        .filter(|(n, _)| *n != "content-length")
+        .collect();
+    g.throughput(Throughput::Elements(10_000));
+    g.bench_function("requests_10k", |b| {
+        b.iter(|| {
+            let mut conn = ServerConn::new(Config::new().max_concurrent_streams(20_000));
+            let mut rest = black_box(&wire[..]);
+            let mut served = 0u32;
+            while !rest.is_empty() {
+                let n = conn.feed(rest);
+                rest = &rest[n..];
+                while let Some(e) = conn.poll().unwrap() {
+                    if let Event::Request { stream, .. } = e {
+                        conn.send_headers(stream, 200, &resp, false).unwrap();
+                        conn.send_data(stream, &body, true).unwrap();
+                        served += 1;
+                    }
+                }
+                let out = conn.output().len();
+                conn.consume_output(out);
+            }
+            served
+        });
+    });
+    g.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_frames,
+    bench_hpack,
+    bench_huffman,
+    bench_conn
+);
 criterion_main!(benches);
