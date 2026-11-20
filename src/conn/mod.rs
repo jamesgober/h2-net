@@ -66,6 +66,7 @@
 
 mod error;
 mod fields;
+mod priority;
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
@@ -73,6 +74,7 @@ use alloc::vec::Vec;
 pub use error::{ConnError, ConnErrorKind, Malformed, Rejection, Violation};
 pub use fields::Scheme;
 use http_net::{FieldSpan, Limits, OwnedRequestHead};
+pub use priority::PriorityParams;
 
 use crate::error::{ErrorCode, FrameError};
 use crate::frame::{self, Decoded, Frame, MAX_WINDOW, PREFACE, SettingId, SettingValues, StreamId};
@@ -309,8 +311,20 @@ pub enum Event<'a> {
         head: OwnedRequestHead,
         /// `:scheme`, or `None` for `CONNECT`.
         scheme: Option<Scheme>,
+        /// The request's priority (RFC 9218): from a `PRIORITY_UPDATE`
+        /// that arrived before the request, or else its `priority` field,
+        /// or else the defaults.
+        priority: PriorityParams,
         /// No body follows.
         end_stream: bool,
+    },
+    /// The peer changed a request's priority (`PRIORITY_UPDATE`, RFC
+    /// 9218). The scheduling is the driver's; the connection only reports.
+    Priority {
+        /// The stream.
+        stream: StreamId,
+        /// The new priority, complete (omitted members are defaults).
+        priority: PriorityParams,
     },
     /// Part of a request body. Call [`ServerConn::release`] with its length
     /// once it has been dealt with (unless [`Config::auto_release`] is on).
@@ -423,6 +437,7 @@ struct Stream {
     unreleased: u32,
     send_window: i64,
     wants_write: bool,
+    priority: PriorityParams,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -500,6 +515,9 @@ pub struct ServerConn {
     peer_goaway: bool,
     events: VecDeque<Queued>,
     error: Option<ConnError>,
+    /// `PRIORITY_UPDATE`s for streams not yet opened (at most the stream
+    /// cap of them).
+    pending_priority: BTreeMap<u32, PriorityParams>,
 }
 
 #[derive(Debug)]
@@ -508,8 +526,10 @@ enum Queued {
         stream: StreamId,
         head: OwnedRequestHead,
         scheme: Option<Scheme>,
+        priority: PriorityParams,
         end_stream: bool,
     },
+    Priority(StreamId, PriorityParams),
     Reset {
         stream: StreamId,
         code: ErrorCode,
@@ -572,6 +592,7 @@ impl ServerConn {
             peer_goaway: false,
             events: VecDeque::new(),
             error: None,
+            pending_priority: BTreeMap::new(),
         };
         conn.send_preface();
         conn
@@ -723,13 +744,16 @@ impl ServerConn {
                 stream,
                 head,
                 scheme,
+                priority,
                 end_stream,
             } => Event::Request {
                 stream,
                 head,
                 scheme,
+                priority,
                 end_stream,
             },
+            Queued::Priority(stream, priority) => Event::Priority { stream, priority },
             Queued::Reset {
                 stream,
                 code,
@@ -1054,7 +1078,32 @@ impl ServerConn {
                     Ok(Step::Nothing)
                 }
             }
-            Frame::Priority { .. } | Frame::PriorityUpdate { .. } | Frame::Unknown { .. } => {
+            Frame::PriorityUpdate { prioritized, field } => {
+                self.charge_control()?;
+                if !prioritized.is_client_initiated() {
+                    // A server never pushes, so an even stream is wrong
+                    // (RFC 9218 section 7.1).
+                    return Err(ConnErrorKind::Protocol(Violation::BadStreamId {
+                        stream: prioritized,
+                    }));
+                }
+                let Some(priority) = PriorityParams::try_parse(field) else {
+                    return Ok(Step::Nothing);
+                };
+                let id = prioritized.value();
+                if let Some(s) = self.streams.get_mut(&id) {
+                    s.priority = priority;
+                    self.events
+                        .push_back(Queued::Priority(prioritized, priority));
+                } else if id > self.last_peer_stream
+                    && (self.pending_priority.len() < self.config.max_concurrent_streams as usize
+                        || self.pending_priority.contains_key(&id))
+                {
+                    let _ = self.pending_priority.insert(id, priority);
+                }
+                Ok(Step::Nothing)
+            }
+            Frame::Priority { .. } | Frame::Unknown { .. } => {
                 self.charge_control()?;
                 Ok(Step::Nothing)
             }
@@ -1246,6 +1295,15 @@ impl ServerConn {
             return Err(ConnErrorKind::Protocol(Violation::BadStreamId { stream }));
         }
         self.last_peer_stream = id;
+        let pending = self.pending_priority.remove(&id);
+        if self
+            .pending_priority
+            .first_key_value()
+            .is_some_and(|(k, _)| *k <= id)
+        {
+            // Updates for streams that can no longer open.
+            self.pending_priority = self.pending_priority.split_off(&(id + 1));
+        }
         if let State::Draining { last, .. } = self.state {
             if id > last {
                 // After the final GOAWAY: ignored, as RFC 9113 says.
@@ -1276,6 +1334,7 @@ impl ServerConn {
             unreleased: 0,
             send_window: i64::from(self.peer.initial_window_size),
             wants_write: false,
+            priority: PriorityParams::default(),
         };
         if self.list.is_oversized() {
             // Answered here; the application never sees it.
@@ -1313,14 +1372,42 @@ impl ServerConn {
         };
         s.content_length = mapped.content_length;
         s.is_head = mapped.is_head;
+        s.priority = pending.unwrap_or_else(|| self.field_priority());
+        let priority = s.priority;
         let _ = self.streams.insert(id, s);
         self.events.push_back(Queued::Request {
             stream,
             head: mapped.head,
             scheme: mapped.scheme,
+            priority,
             end_stream,
         });
         Ok(Step::Nothing)
+    }
+
+    /// The `priority` field of the request just decoded; several fields
+    /// are one dictionary, joined with commas (RFC 8941 section 3.2).
+    fn field_priority(&self) -> PriorityParams {
+        let mut fields = self.list.iter().filter(|f| f.name == b"priority");
+        let Some(first) = fields.next() else {
+            return PriorityParams::default();
+        };
+        let Some(second) = fields.next() else {
+            return PriorityParams::parse(first.value);
+        };
+        let mut joined = Vec::with_capacity(first.value.len() + second.value.len() + 16);
+        joined.extend_from_slice(first.value);
+        for f in core::iter::once(second).chain(fields) {
+            joined.push(b',');
+            joined.extend_from_slice(f.value);
+        }
+        PriorityParams::parse(&joined)
+    }
+
+    /// The current priority of an open stream.
+    #[must_use]
+    pub fn priority(&self, stream: StreamId) -> Option<PriorityParams> {
+        self.streams.get(&stream.value()).map(|s| s.priority)
     }
 
     fn trailers(&mut self, stream: StreamId, end_stream: bool) -> Result<Step, Fail> {

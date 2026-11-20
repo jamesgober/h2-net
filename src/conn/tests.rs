@@ -131,6 +131,7 @@ enum Ev {
     },
     Writable(u32),
     GoAway(ErrorCode),
+    Priority(u32, PriorityParams),
     Error(ConnErrorKind),
 }
 
@@ -202,6 +203,7 @@ fn own(e: Event<'_>) -> Ev {
         },
         Event::Writable { stream } => Ev::Writable(stream.value()),
         Event::GoAway { code } => Ev::GoAway(code),
+        Event::Priority { stream, priority } => Ev::Priority(stream.value(), priority),
     }
 }
 
@@ -1416,4 +1418,131 @@ fn test_abuse_errors_are_marked() {
     assert!(e.is_abuse());
     assert_eq!(e.code(), ErrorCode::ENHANCE_YOUR_CALM);
     assert!(!ConnError::new(ConnErrorKind::FlowControl).is_abuse());
+}
+
+// ---- Priorities (RFC 9218).
+
+fn priorities(conn: &mut ServerConn, wire: &[u8]) -> Vec<(u32, PriorityParams, bool)> {
+    let _ = conn.feed(wire);
+    let mut got = vec![];
+    while let Some(e) = conn.poll().unwrap() {
+        match e {
+            Event::Request {
+                stream, priority, ..
+            } => got.push((stream.value(), priority, true)),
+            Event::Priority { stream, priority } => got.push((stream.value(), priority, false)),
+            _ => {}
+        }
+    }
+    got
+}
+
+fn pp(urgency: u8, incremental: bool) -> PriorityParams {
+    PriorityParams {
+        urgency,
+        incremental,
+    }
+}
+
+fn get_with(c: &mut Client, stream: u32, extra: &[(&[u8], &[u8])]) {
+    let mut f: Vec<(&[u8], &[u8])> = vec![
+        (b":method", b"GET"),
+        (b":scheme", b"https"),
+        (b":authority", b"a"),
+        (b":path", b"/"),
+    ];
+    f.extend_from_slice(extra);
+    c.headers(stream, &f, true);
+}
+
+#[test]
+fn test_priority_field_and_defaults() {
+    let (mut conn, _) = open(Config::new());
+    let mut c = Client::bare();
+    get_with(&mut c, 1, &[(b"priority", b"u=1, i")]);
+    get_with(&mut c, 3, &[]);
+    // Two fields are one dictionary.
+    get_with(&mut c, 5, &[(b"priority", b"u=6"), (b"priority", b"i")]);
+    // Not a dictionary: the defaults.
+    get_with(&mut c, 7, &[(b"priority", b"u=1,")]);
+    assert_eq!(
+        priorities(&mut conn, &c.take()),
+        [
+            (1, pp(1, true), true),
+            (3, pp(3, false), true),
+            (5, pp(6, true), true),
+            (7, pp(3, false), true)
+        ]
+    );
+    assert_eq!(conn.priority(sid(1)), Some(pp(1, true)));
+    assert_eq!(conn.priority(sid(99)), None);
+}
+
+#[test]
+fn test_priority_update_for_open_and_idle_streams() {
+    let (mut conn, _) = open(Config::new());
+    let mut c = Client::bare();
+    get_with(&mut c, 1, &[(b"priority", b"u=5")]);
+    c.frame(&Frame::PriorityUpdate {
+        prioritized: sid(1),
+        field: b"u=0",
+    });
+    // Before stream 3 opens: it wins over the field.
+    c.frame(&Frame::PriorityUpdate {
+        prioritized: sid(3),
+        field: b"u=2, i",
+    });
+    get_with(&mut c, 3, &[(b"priority", b"u=7")]);
+    // Not a dictionary: ignored, no event.
+    c.frame(&Frame::PriorityUpdate {
+        prioritized: sid(1),
+        field: b"u=",
+    });
+    assert_eq!(
+        priorities(&mut conn, &c.take()),
+        [
+            (1, pp(5, false), true),
+            (1, pp(0, false), false),
+            (3, pp(2, true), true)
+        ]
+    );
+    assert_eq!(conn.priority(sid(1)), Some(pp(0, false)));
+}
+
+#[test]
+fn test_priority_update_for_a_push_stream_is_an_error() {
+    let (mut conn, _) = open(Config::new());
+    let mut c = Client::bare();
+    c.frame(&Frame::PriorityUpdate {
+        prioritized: sid(2),
+        field: b"u=1",
+    });
+    assert_eq!(
+        run(&mut conn, &c.take()),
+        [Ev::Error(ConnErrorKind::Protocol(Violation::BadStreamId {
+            stream: sid(2)
+        }))]
+    );
+}
+
+#[test]
+fn test_pending_priority_updates_are_bounded() {
+    let (mut conn, _) = open(Config::new().max_concurrent_streams(2));
+    let mut c = Client::bare();
+    for id in [101u32, 103, 105] {
+        c.frame(&Frame::PriorityUpdate {
+            prioritized: sid(id),
+            field: b"u=0",
+        });
+    }
+    let _ = run(&mut conn, &c.take());
+    assert_eq!(conn.pending_priority.len(), 2);
+    // Opening stream 103 drops the update for 101, which can never open.
+    let mut c = Client::bare();
+    get_with(&mut c, 103, &[]);
+    assert_eq!(
+        priorities(&mut conn, &c.take()),
+        [(103, pp(0, false), true)]
+    );
+    assert!(conn.pending_priority.is_empty());
 }

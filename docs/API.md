@@ -10,7 +10,7 @@
 - [Crate root](#crate-root): `VERSION`, `ErrorCode`, `FrameError`, `HpackError`
 - [`frame`](#frame): `decode`, `encode`, `Decoded`, `Frame`, `FrameHeader`, `FrameType`, `StreamId`, `Priority`, `Settings`, `SettingId`, `SettingValues`, `settings_frame`, `flags`, constants
 - [`hpack`](#hpack): `Decoder`, `Encoder`, `HeaderList`, `HeaderField`, `huffman`, `FIELD_OVERHEAD`
-- [`conn`](#conn): `ServerConn`, `Config`, `Event`, `Scheme`, `SendError`, `ConnError`, `ConnErrorKind`, `Violation`, `Rejection`, `Malformed`
+- [`conn`](#conn): `ServerConn`, `Config`, `Event`, `Scheme`, `PriorityParams`, `SendError`, `ConnError`, `ConnErrorKind`, `Violation`, `Rejection`, `Malformed`
 
 ## Crate root
 
@@ -166,7 +166,7 @@ The server side of one HTTP/2 connection, without I/O.
 - `send_trailers(stream, fields)`, `reset(stream, code)`.
 - `release(stream, n)`: gives request body bytes back to the peer's windows once dealt with.
 - `shutdown()`: graceful, in two steps; `close(code)`: at once.
-- `is_done()`, `settings_acked()`, `open_streams()`.
+- `is_done()`, `settings_acked()`, `open_streams()`, `priority(stream)`.
 
 ```rust
 use h2_net::conn::{Config, Event, ServerConn};
@@ -222,7 +222,19 @@ Secure defaults, each setter documenting its cost: `max_concurrent_streams` (100
 
 ### `Event`
 
-`Request { stream, head, scheme, end_stream }` (`head` is http-net's `OwnedRequestHead`; its framing tells whether a body follows), `Data { stream, data, end_stream }`, `Trailers { stream, fields }`, `Reset { stream, code, remote }`, `Rejected { stream, reason }` (a request answered without the application: malformed, too large, or over the stream cap), `Writable { stream }`, `GoAway { code }`. `#[non_exhaustive]`.
+`Request { stream, head, scheme, priority, end_stream }` (`head` is http-net's `OwnedRequestHead`; its framing tells whether a body follows), `Data { stream, data, end_stream }`, `Trailers { stream, fields }`, `Reset { stream, code, remote }`, `Rejected { stream, reason }` (a request answered without the application: malformed, too large, or over the stream cap), `Writable { stream }`, `GoAway { code }`, `Priority { stream, priority }` (a `PRIORITY_UPDATE` for an open stream). `#[non_exhaustive]`.
+
+### `PriorityParams`
+
+A request's priority (RFC 9218): `urgency` 0 to 7 (default 3) and `incremental` (default false). `parse` reads a Priority Field Value as an RFC 8941 dictionary; a value that does not parse gives the defaults, and a member of the wrong type or out of range keeps its default. `try_parse` returns `None` instead for a value that does not parse. The connection reports priorities and orders nothing: scheduling is the driver's.
+
+```rust
+use h2_net::conn::PriorityParams;
+
+let p = PriorityParams::parse(b"u=1, i");
+assert_eq!((p.urgency, p.incremental), (1, true));
+assert_eq!(PriorityParams::parse(b"u=9"), PriorityParams::default());
+```
 
 ### Errors
 

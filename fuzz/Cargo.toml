@@ -52,3 +52,10 @@ path  = "fuzz_targets/server_conn.rs"
 test  = false
 doc   = false
 bench = false
+
+[[bin]]
+name  = "priority"
+path  = "fuzz_targets/priority.rs"
+test  = false
+doc   = false
+bench = false

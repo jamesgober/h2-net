@@ -27,6 +27,7 @@ enum Op {
     SettingsAck,
     Ping { ack: bool },
     Priority { stream: u8, dep: u8 },
+    PriorityUpdate { stream: u8, field: Vec<u8> },
     GoAway,
     Respond { stream: u8, status: u16, end: bool },
     Send { stream: u8, len: u16, end: bool },
@@ -138,6 +139,10 @@ fuzz_target!(|ops: Vec<Op>| {
                     stream: sid(*stream),
                     priority: Priority { exclusive: false, depends_on: sid(*dep), weight: 0 },
                 },
+                &mut out,
+            ),
+            Op::PriorityUpdate { stream, field } => enc_frame(
+                &Frame::PriorityUpdate { prioritized: sid(*stream), field },
                 &mut out,
             ),
             Op::GoAway => enc_frame(

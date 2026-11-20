@@ -36,6 +36,10 @@ The codec (frames and HPACK) and the server connection.
   http-net's `OwnedRequestHead` (the request written out as HTTP/1.1 and
   parsed by http-net, so both versions are equally strict); responses go in
   as status and fields, with HTTP/1.1's connection fields dropped.
+- Extensible priorities (RFC 9218): `PriorityParams`, read from the
+  `priority` field and from `PRIORITY_UPDATE` frames, reported with each
+  request and as `Event::Priority` when they change. The connection
+  reports them; ordering responses is the driver's.
 - Budgets against rapid reset and provoked resets, `CONTINUATION` floods,
   `SETTINGS`, `PING`, and other control floods, a peer that does not read,
   and stream exhaustion, each with an attack test. A request over the header
@@ -44,7 +48,8 @@ The codec (frames and HPACK) and the server connection.
 - Tests: RFC 7541 Appendix C byte for byte, a decode at every split point
   for every frame type, every refusal in RFC 9113 section 6. Fuzz targets
   for the frame decoder, the HPACK decoder, the HPACK round trip, the
-  Huffman code, and the server connection, with a smoke run in CI.
+  Huffman code, the server connection, and the priority field, with a smoke
+  run in CI.
   Benchmarks.
 - A dependency on http-net 0.10 (default features off; the crate stays
   `no_std`).
