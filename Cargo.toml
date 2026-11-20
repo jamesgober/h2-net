@@ -50,13 +50,21 @@ default = []
 # DEPENDENCIES
 # #################################
 [dependencies]
-# None yet. Planned dependencies and the reason for each are listed in
-# dev/PLAN.md; each is added with the first code that needs it.
+# None. The codec needs nothing from outside the crate; the connection
+# layer adds http-net (first party, published) for the mapping.
 
 
 # DEV DEPENDENCIES
 # #################################
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+
+# BENCHMARKS
+# #################################
+[[bench]]
+name    = "codec"
+harness = false
 
 
 # RELEASE PROFILE

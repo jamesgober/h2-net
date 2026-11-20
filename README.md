@@ -21,26 +21,49 @@
         <strong>h2-net</strong> is HTTP/2 the way http-net is HTTP/1.1: a sans-IO engine that refuses what it cannot frame unambiguously and bounds every buffer. serve-net selects it through ALPN after the TLS handshake.
     </p>
     <p>
-        It is planned for later: behind Apache or nginx, the front end already speaks HTTP/2 to browsers and HTTP/1.1 to us. It matters for direct mode.
+        It matters for direct mode, where no Apache or nginx sits in front to speak HTTP/2 to browsers.
     </p>
     <br>
     <hr>
     <p>
-        <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>.
+        <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>. <code>no_std</code> with <code>alloc</code>. No runtime dependencies.
     </p>
     <blockquote>
-        <strong>Status: scaffold (<code>0.1.0</code>).</strong> No functional code yet. The design is written down in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a> and the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>; the public API is locked in <code>0.2.0</code>.
+        <strong>Status: in development.</strong> The codec (frames and HPACK) is built and tested; the connection engine (streams, flow control, budgets) is next. The schedule is in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>.
     </blockquote>
 </div>
 
 <hr>
 <br>
 
-## Scope
+## What is built
 
-Frame parsing and serialization, HPACK with bounded dynamic tables, stream states, flow control, settings, priority signals, GOAWAY and graceful shutdown, and defences against known HTTP/2 attacks (rapid reset, CONTINUATION floods, HPACK bombs, settings floods).
+- **Frames** (`h2_net::frame`): every frame type of RFC 9113 and `PRIORITY_UPDATE` from RFC 9218, read as borrowed views and written back. Every check RFC 9113 puts on a frame by itself is applied, and the encoder refuses whatever the decoder would refuse. A frame longer than `SETTINGS_MAX_FRAME_SIZE` is refused from its 9-byte header, before its payload is buffered.
+- **HPACK** (`h2_net::hpack`): a decoder and encoder with bounded dynamic tables and Huffman coding. A field block decodes into a `HeaderList` with a budget that is checked before any field is copied, so a small block that names a large table entry many times cannot grow past it. A block over the budget still keeps the dynamic table in step, so the request can be refused with 431 without closing the connection. The encoder never indexes credentials.
 
-See [`dev/PLAN.md`](./dev/PLAN.md) for the full scope, what is deliberately left to other crates, and the decision log.
+```rust
+use h2_net::hpack::{Decoder, Encoder, HeaderField, HeaderList};
+
+let mut encoder = Encoder::new(4096);
+let mut block = Vec::new();
+encoder.encode(
+    [HeaderField::new(b":status", b"200"), HeaderField::new(b"content-type", b"text/plain")],
+    &mut block,
+);
+
+let mut decoder = Decoder::new(4096);
+let mut fields = HeaderList::new(16 * 1024);
+decoder.decode(&block, &mut fields).expect("a block this encoder wrote");
+assert_eq!(fields.get(":status"), Some(&b"200"[..]));
+```
+
+The whole API is in [`docs/API.md`](./docs/API.md).
+
+## Next
+
+Streams, flow control, settings, `GOAWAY` and graceful shutdown, priority signals (RFC 9218), and the budgets against HTTP/2's known attacks (rapid reset, `CONTINUATION` floods, settings and ping floods, stream exhaustion). Requests and responses map to the same types http-net produces, so serve-net and web-net do not care which version arrived.
+
+See [`dev/PLAN.md`](./dev/PLAN.md) for the design, the threats and what each defence costs, and the decision log.
 
 <hr>
 <br>
