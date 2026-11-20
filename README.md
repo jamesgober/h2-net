@@ -58,6 +58,7 @@ assert_eq!(fields.get(":status"), Some(&b"200"[..]));
 ```
 
 - **Connection** (`h2_net::conn`): the server side of a connection. Feed it bytes and poll for events; requests arrive as http-net's `OwnedRequestHead`, built by writing the request out as HTTP/1.1 and parsing it with http-net, so both versions get the same type and the same strictness. It answers `SETTINGS` and `PING`, runs flow control in both directions, enforces RFC 9113's rules for requests (pseudo-headers, connection-specific fields, `content-length` against the body), and shuts down gracefully in RFC 9113's two steps. Every known HTTP/2 attack has a budget that ends the connection with `ENHANCE_YOUR_CALM` and marks it as abuse: rapid reset and resets the peer provokes, `CONTINUATION` floods, `SETTINGS` and `PING` floods, a peer that sends but never reads, and stream exhaustion. None of them needs a clock. Priority signals (RFC 9218) are read and reported with each request, for the driver's scheduler.
+- **Client** (`h2_net::conn::ClientConn`): the same connection from the other side, for outbound HTTP/2. It shares the protocol and the budgets with the server side, refuses server push, checks every response by RFC 9113, and reports the requests a `GOAWAY` left unprocessed so they can be retried.
 
 The whole API is in [`docs/API.md`](./docs/API.md).
 

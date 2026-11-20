@@ -16,11 +16,14 @@
 //!   connection, each answered with a head and a 1 KiB body, the output read
 //!   after each: the whole server path (frames, HPACK both ways, the
 //!   mapping onto http-net, flow control).
+//! - `conn/client_server_10k`: 10,000 requests from a `ClientConn` to a
+//!   `ServerConn` in memory, 100 at a time, each answered with a 1 KiB body:
+//!   both sides of the protocol.
 
 use std::hint::black_box;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use h2_net::conn::{Config, Event, ServerConn};
+use h2_net::conn::{ClientConn, Config, Event, RequestParts, Scheme, ServerConn};
 use h2_net::frame::{self, Decoded, Frame, StreamId};
 use h2_net::hpack::{Decoder, Encoder, HeaderField, HeaderList, huffman};
 
@@ -284,6 +287,55 @@ fn bench_conn(c: &mut Criterion) {
                 conn.consume_output(out);
             }
             served
+        });
+    });
+    g.bench_function("client_server_10k", |b| {
+        let fields: Vec<(&str, &[u8])> = REQUEST
+            .iter()
+            .skip(4)
+            .map(|(n, v)| (std::str::from_utf8(n).unwrap(), &v[..]))
+            .collect();
+        let head = RequestParts {
+            method: "GET",
+            scheme: Scheme::Https,
+            authority: "www.example.com",
+            path: "/assets/app.4f3c2a.js?v=20261120",
+            fields: &fields,
+        };
+        b.iter(|| {
+            let mut client = ClientConn::new(Config::new().auto_release(true));
+            let mut server = ServerConn::new(Config::new().max_concurrent_streams(200));
+            let mut done = 0u32;
+            let mut sent = 0u32;
+            while done < 10_000 {
+                while sent < 10_000 && sent - done < 100 {
+                    if client.send_request(black_box(&head), true).is_err() {
+                        break;
+                    }
+                    sent += 1;
+                }
+                let out = client.output().to_vec();
+                let n = server.feed(&out);
+                client.consume_output(n);
+                while let Some(e) = server.poll().unwrap() {
+                    if let Event::Request { stream, .. } = e {
+                        server.send_headers(stream, 200, &resp, false).unwrap();
+                        server.send_data(stream, &body, true).unwrap();
+                    }
+                }
+                let out = server.output().to_vec();
+                let n = client.feed(&out);
+                server.consume_output(n);
+                while let Some(e) = client.poll().unwrap() {
+                    if let Event::Data {
+                        end_stream: true, ..
+                    } = e
+                    {
+                        done += 1;
+                    }
+                }
+            }
+            done
         });
     });
     g.finish();

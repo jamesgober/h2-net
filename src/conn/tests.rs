@@ -204,6 +204,9 @@ fn own(e: Event<'_>) -> Ev {
         Event::Writable { stream } => Ev::Writable(stream.value()),
         Event::GoAway { code } => Ev::GoAway(code),
         Event::Priority { stream, priority } => Ev::Priority(stream.value(), priority),
+        Event::Response { .. } | Event::Informational { .. } => {
+            panic!("a server reported a response")
+        }
     }
 }
 

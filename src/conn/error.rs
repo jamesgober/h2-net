@@ -173,6 +173,8 @@ pub enum Violation {
     PushPromise,
     /// A `SETTINGS` acknowledgment with none outstanding.
     UnsolicitedSettingsAck,
+    /// A server sent `PRIORITY_UPDATE` (RFC 9218 section 7.1).
+    PriorityUpdate,
 }
 
 impl fmt::Display for Violation {
@@ -193,6 +195,7 @@ impl fmt::Display for Violation {
             }
             Self::PushPromise => f.write_str("a client sent PUSH_PROMISE"),
             Self::UnsolicitedSettingsAck => f.write_str("SETTINGS acknowledged without being sent"),
+            Self::PriorityUpdate => f.write_str("a server sent PRIORITY_UPDATE"),
         }
     }
 }
@@ -251,4 +254,7 @@ pub enum Malformed {
     ContentLength,
     /// The head, written as HTTP/1.1, was refused by http-net.
     Http(http_net::HttpError),
+    /// A response without one `:status` of three digits, `101`, or an
+    /// informational head that ends the stream.
+    Status,
 }
