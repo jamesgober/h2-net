@@ -2,7 +2,7 @@
 
 > The design, strategy, and decision record for `h2-net`. A living document: every design decision, idea, or open question about h2-net is written here or in [`ROADMAP.md`](./ROADMAP.md) before it is acted on.
 >
-> **Status:** in development since 2026-11-20 (D-001). The codec (frames and HPACK), the connection engine, and RFC 9218 priority signals are built; serve-net's side (several streams per connection, ALPN `h2`) is next, once h2-net is published. Published: `0.1.0` (scaffold).
+> **Status:** in development since 2026-11-20 (D-001). The codec (frames and HPACK), the connection engine, and RFC 9218 priority signals are built; serve-net's side (several streams per connection, ALPN `h2`) is next, once h2-net is published. Released: `0.3.0` (tagged on GitHub; not yet on crates.io).
 
 ---
 

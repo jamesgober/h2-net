@@ -17,7 +17,7 @@ The design lock of 0.2.0 now covers the codec only; the connection API moves to 
 - [x] RFC 7541 Appendix C examples, byte for byte, and the static table and Huffman code generated from the RFC's text.
 - [x] Fuzz targets for the frame decoder, the HPACK decoder, the HPACK round trip, and the Huffman code; a CI smoke run for each.
 - [x] Benchmarks: frame decode and encode, HPACK decode and encode of realistic request and response sections, the HPACK bomb, the Huffman code (baseline in PLAN section 7).
-- [ ] Release.
+- [x] Released as part of v0.3.0 (not on its own).
 
 ## v0.3.0 - Engine
 - [x] Connection preface, `SETTINGS` exchange and acknowledgment, `PING`, `GOAWAY` and graceful shutdown.
@@ -27,8 +27,9 @@ The design lock of 0.2.0 now covers the codec only; the connection API moves to 
 - [x] Mapping to http-net's request type; responses from status and fields (HTTP/1.1's connection fields dropped).
 - [x] Every budget in PLAN section 5, each with an attack test that must fail without it; offences reported (`ConnError::is_abuse`) so serve-net can make them bouncer strikes.
 - [x] A fuzz target for the connection.
+- [ ] The priority field's dictionary parser moves to parse-net's Structured Fields once http-net depends on a parse-net that has them (one parse-net in the tree, not two).
 - [x] Priority signals (RFC 9218): read and reported to the driver (moved here from v0.4.0's list once built; the scheduling stays serve-net's).
-- [ ] Release.
+- [x] Released: tagged v0.3.0 on GitHub, 2026-11-20. The first crates.io publish waits on James.
 
 ## v0.4.0 - In serve-net
 - [ ] serve-net's engine slot for several streams per connection; ALPN `h2` selects h2-net; serve-net's scheduler uses the priority signals. Waits on h2-net's first functional release: serve-net takes dependencies at published versions only, never by path.
