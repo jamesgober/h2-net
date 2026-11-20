@@ -16,6 +16,11 @@
 //!   connection, each answered with a head and a 1 KiB body, the output read
 //!   after each: the whole server path (frames, HPACK both ways, the
 //!   mapping onto http-net, flow control).
+//! - `h1/requests_10k`: the `conn/requests_10k` work through http-net's
+//!   HTTP/1.1 server connection instead (the same request fields, the
+//!   same response fields and 1 KiB body, one connection, the head written
+//!   with `write_head`, which allocates nothing): the baseline HTTP/2 is
+//!   compared with.
 //! - `conn/client_server_10k`: 10,000 requests from a `ClientConn` to a
 //!   `ServerConn` in memory, 100 at a time, each answered with a 1 KiB body:
 //!   both sides of the protocol.
@@ -341,11 +346,77 @@ fn bench_conn(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_h1(c: &mut Criterion) {
+    use http_net::{OutgoingBody, ResponseHeadRef, ServerConn as H1, ServerEvent};
+
+    let mut g = c.benchmark_group("h1");
+    let mut one = Vec::new();
+    one.extend_from_slice(
+        b"GET /assets/app.4f3c2a.js?v=20261120 HTTP/1.1\r\nhost: www.example.com\r\n",
+    );
+    for (n, v) in REQUEST.iter().skip(4) {
+        one.extend_from_slice(n);
+        one.extend_from_slice(b": ");
+        one.extend_from_slice(v);
+        one.extend_from_slice(b"\r\n");
+    }
+    one.extend_from_slice(b"\r\n");
+    let wire: Vec<u8> = one
+        .iter()
+        .copied()
+        .cycle()
+        .take(one.len() * 10_000)
+        .collect();
+    let body = vec![0x41u8; 1024];
+    let fields: Vec<(&str, &[u8])> = RESPONSE
+        .iter()
+        .skip(1)
+        .map(|(n, v)| (std::str::from_utf8(n).unwrap(), &v[..]))
+        .filter(|(n, _)| *n != "content-length")
+        .collect();
+    g.throughput(Throughput::Elements(10_000));
+    g.bench_function("requests_10k", |b| {
+        let mut out = Vec::with_capacity(4096);
+        b.iter(|| {
+            let mut conn = H1::new();
+            let mut rest = black_box(&wire[..]);
+            let mut served = 0u32;
+            loop {
+                let n = conn.feed(rest);
+                rest = &rest[n..];
+                loop {
+                    match conn.poll().unwrap() {
+                        ServerEvent::RequestEnd => {
+                            out.clear();
+                            let head = ResponseHeadRef::new(
+                                200,
+                                &fields,
+                                OutgoingBody::Full(body.len() as u64),
+                            );
+                            conn.write_head(&head, None, &mut out).unwrap();
+                            out.extend_from_slice(&body);
+                            served += 1;
+                        }
+                        ServerEvent::NeedInput => break,
+                        _ => {}
+                    }
+                }
+                if rest.is_empty() && served == 10_000 {
+                    break;
+                }
+            }
+            served
+        });
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_frames,
     bench_hpack,
     bench_huffman,
-    bench_conn
+    bench_conn,
+    bench_h1
 );
 criterion_main!(benches);

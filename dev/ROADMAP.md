@@ -34,6 +34,8 @@ The design lock of 0.2.0 now covers the codec only; the connection API moves to 
 ## v0.4.0 - Client, and in serve-net
 - [x] The client side: `ClientConn`, sharing the protocol and the budgets with the server side (D-015); tests against the server side in memory; a fuzz target with a hostile server.
 - [ ] A response head as http-net's type, once http-net has an owned response head (asked of http-net).
+- [x] HTTP/2 measured against HTTP/1.1 on the same work (`h1/requests_10k`); the encoder's static lookup and the per-head allocation taken (PLAN section 7).
+- [ ] The rest of the gap: the experiments in PLAN section 7.
 - [ ] serve-net's engine slot for several streams per connection; ALPN `h2` selects h2-net; serve-net's scheduler uses the priority signals. Waits on h2-net's first functional release: serve-net takes dependencies at published versions only, never by path.
 - [x] Head pooling: tried and rejected (PLAN section 6).
 - [x] v0.3.1: the client side, released and published on crates.io, the first publish (D-016).

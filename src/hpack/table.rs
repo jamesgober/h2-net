@@ -11,7 +11,7 @@
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-use super::tables::STATIC;
+use super::tables::{STATIC, static_names};
 
 /// The size RFC 7541 counts for each entry on top of its name and value.
 pub(crate) const ENTRY_OVERHEAD: usize = 32;
@@ -143,13 +143,13 @@ impl Table {
     /// exact matches anywhere over a name match.
     pub(crate) fn find(&self, name: &[u8], value: &[u8]) -> Option<(usize, bool)> {
         let mut by_name = None;
-        for (i, &(n, v)) in STATIC.iter().enumerate() {
-            if n == name {
-                if v == value {
-                    return Some((i + 1, true));
+        if let Some((first, count)) = static_names(name) {
+            for index in first..first + count {
+                if STATIC.get(index - 1).is_some_and(|&(_, v)| v == value) {
+                    return Some((index, true));
                 }
-                by_name = by_name.or(Some(i + 1));
             }
+            by_name = Some(first);
         }
         for i in 0..self.entries.len() {
             let index = STATIC_LEN + 1 + i;
@@ -231,6 +231,18 @@ mod tests {
         t.set_max(0);
         assert_eq!(t.len(), 0);
         assert!(t.bytes.is_empty());
+    }
+
+    #[test]
+    fn test_static_names_match_the_table() {
+        for (i, &(name, _)) in STATIC.iter().enumerate() {
+            let (first, count) = static_names(name).unwrap();
+            assert!(first <= i + 1 && i + 1 < first + count, "{i}");
+            assert_eq!(STATIC[first - 1].0, name);
+            assert!(first == 1 || STATIC[first - 2].0 != name);
+        }
+        assert_eq!(static_names(b"x-custom"), None);
+        assert_eq!(static_names(b"Content-Type"), None);
     }
 
     #[test]

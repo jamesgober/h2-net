@@ -578,6 +578,9 @@ pub struct Connection<R: Role> {
     slots: Vec<FieldSpan>,
     limits: Limits,
     scratch_fields: Vec<u8>,
+    /// Where each field's lowercased name sits in `scratch_fields`, and the
+    /// field's place in the caller's list.
+    scratch_spans: Vec<(usize, usize, usize)>,
     streams: BTreeMap<u32, Stream>,
     /// Streams this side reset lately, whose late frames are ignored.
     recent_resets: VecDeque<u32>,
@@ -662,6 +665,7 @@ impl<R: Role> Connection<R> {
                 .with_max_headers(config.max_header_list_size as usize / 32 + 2)
                 .with_max_body(u64::MAX),
             scratch_fields: Vec::new(),
+            scratch_spans: Vec::new(),
             streams: BTreeMap::new(),
             recent_resets: VecDeque::new(),
             last_peer_stream: 0,
@@ -1767,9 +1771,10 @@ impl<R: Role> Connection<R> {
         // anything is written.
         let mut names = core::mem::take(&mut self.scratch_fields);
         names.clear();
-        let mut spans = Vec::with_capacity(fields.len());
+        let mut spans = core::mem::take(&mut self.scratch_spans);
+        spans.clear();
         let mut send_length = None;
-        for (name, value) in fields {
+        for (i, (name, value)) in fields.iter().enumerate() {
             let name = name.as_bytes();
             if fields::is_connection_specific(name) {
                 continue;
@@ -1780,6 +1785,7 @@ impl<R: Role> Connection<R> {
             let field = HeaderField::new(lower, value);
             if let Err(e) = fields::check_regular(&field) {
                 self.scratch_fields = names;
+                self.scratch_spans = spans;
                 return Err(SendError::Field(e));
             }
             if lower == b"content-length" {
@@ -1788,10 +1794,11 @@ impl<R: Role> Connection<R> {
                     .and_then(|v| v.parse::<u64>().ok());
                 if send_length.is_none() {
                     self.scratch_fields = names;
+                    self.scratch_spans = spans;
                     return Err(SendError::Field(Malformed::FieldValue));
                 }
             }
-            spans.push((start, names.len(), *value));
+            spans.push((start, names.len(), i));
         }
         let mut status_text = [0u8; 3];
         status_text[0] = b'0' + (status / 100) as u8;
@@ -1800,16 +1807,20 @@ impl<R: Role> Connection<R> {
         let mut block = core::mem::take(&mut self.block);
         block.clear();
         self.encoder.encode(
-            core::iter::once(HeaderField::new(b":status", &status_text)).chain(
-                spans
-                    .iter()
-                    .map(|(a, b, v)| HeaderField::new(names.get(*a..*b).unwrap_or_default(), v)),
-            ),
+            core::iter::once(HeaderField::new(b":status", &status_text)).chain(spans.iter().map(
+                |&(a, b, i)| {
+                    HeaderField::new(
+                        names.get(a..b).unwrap_or_default(),
+                        fields.get(i).map_or(&[][..], |f| f.1),
+                    )
+                },
+            )),
             &mut block,
         );
         self.write_block(stream, &block, end_stream);
         self.block = block;
         self.scratch_fields = names;
+        self.scratch_spans = spans;
 
         if let Some(s) = self.streams.get_mut(&stream.value()) {
             if !informational {
@@ -1961,28 +1972,34 @@ impl<R: Role> Connection<R> {
         }
         let mut names = core::mem::take(&mut self.scratch_fields);
         names.clear();
-        let mut spans = Vec::with_capacity(fields.len());
-        for (name, value) in fields {
+        let mut spans = core::mem::take(&mut self.scratch_spans);
+        spans.clear();
+        for (i, (name, value)) in fields.iter().enumerate() {
             let start = names.len();
             names.extend(name.as_bytes().iter().map(u8::to_ascii_lowercase));
             let lower = names.get(start..).unwrap_or_default();
             if let Err(e) = fields::check_regular(&HeaderField::new(lower, value)) {
                 self.scratch_fields = names;
+                self.scratch_spans = spans;
                 return Err(SendError::Field(e));
             }
-            spans.push((start, names.len(), *value));
+            spans.push((start, names.len(), i));
         }
         let mut block = core::mem::take(&mut self.block);
         block.clear();
         self.encoder.encode(
-            spans
-                .iter()
-                .map(|(a, b, v)| HeaderField::new(names.get(*a..*b).unwrap_or_default(), v)),
+            spans.iter().map(|&(a, b, i)| {
+                HeaderField::new(
+                    names.get(a..b).unwrap_or_default(),
+                    fields.get(i).map_or(&[][..], |f| f.1),
+                )
+            }),
             &mut block,
         );
         self.write_block(stream, &block, true);
         self.block = block;
         self.scratch_fields = names;
+        self.scratch_spans = spans;
         if let Some(s) = self.streams.get_mut(&stream.value()) {
             s.local_ended = true;
         }
@@ -2123,9 +2140,10 @@ impl Connection<Client> {
 
         let mut names = core::mem::take(&mut self.scratch_fields);
         names.clear();
-        let mut spans = Vec::with_capacity(request.fields.len());
+        let mut spans = core::mem::take(&mut self.scratch_spans);
+        spans.clear();
         let mut send_length = None;
-        for (name, value) in request.fields {
+        for (i, (name, value)) in request.fields.iter().enumerate() {
             let name = name.as_bytes();
             if fields::is_connection_specific(name) || name.eq_ignore_ascii_case(b"host") {
                 continue;
@@ -2135,6 +2153,7 @@ impl Connection<Client> {
             let lower = names.get(start..).unwrap_or_default();
             if let Err(e) = fields::check_regular(&HeaderField::new(lower, value)) {
                 self.scratch_fields = names;
+                self.scratch_spans = spans;
                 return Err(SendError::Field(e));
             }
             if lower == b"content-length" {
@@ -2143,13 +2162,15 @@ impl Connection<Client> {
                     .and_then(|v| v.parse::<u64>().ok());
                 if send_length.is_none() {
                     self.scratch_fields = names;
+                    self.scratch_spans = spans;
                     return Err(SendError::Field(Malformed::ContentLength));
                 }
             }
-            spans.push((start, names.len(), *value));
+            spans.push((start, names.len(), i));
         }
         if end_stream && send_length.is_some_and(|n| n > 0) {
             self.scratch_fields = names;
+            self.scratch_spans = spans;
             return Err(SendError::Body);
         }
         let scheme = request.scheme.as_str().as_bytes();
@@ -2165,16 +2186,18 @@ impl Connection<Client> {
         let mut block = core::mem::take(&mut self.block);
         block.clear();
         self.encoder.encode(
-            pseudo.into_iter().chain(
-                spans
-                    .iter()
-                    .map(|(a, b, v)| HeaderField::new(names.get(*a..*b).unwrap_or_default(), v)),
-            ),
+            pseudo.into_iter().chain(spans.iter().map(|&(a, b, i)| {
+                HeaderField::new(
+                    names.get(a..b).unwrap_or_default(),
+                    request.fields.get(i).map_or(&[][..], |f| f.1),
+                )
+            })),
             &mut block,
         );
         self.write_block(stream, &block, end_stream);
         self.block = block;
         self.scratch_fields = names;
+        self.scratch_spans = spans;
         self.next_stream = self.next_stream.saturating_add(2);
         let s = Stream {
             peer_ended: false,
