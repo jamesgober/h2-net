@@ -11,6 +11,15 @@
 
 ## [Unreleased]
 
+### Performance
+
+- The HPACK encoder finds static table names with a generated `match`
+  instead of a scan of all 61 entries: encoding a typical response is 44%
+  faster. A response or request head no longer allocates a list of its
+  fields.
+- `h1/requests_10k` measures the same work through HTTP/1.1, to compare
+  HTTP/2 against.
+
 ---
 
 ## [0.3.1] - 2026-11-20
@@ -31,15 +40,6 @@ The client side, and the first release on crates.io.
 
 - `ServerConn` is now `Connection<Server>`, an alias; nothing a server's
   code calls changed.
-
-### Performance
-
-- The HPACK encoder finds static table names with a generated `match`
-  instead of a scan of all 61 entries: encoding a typical response is 44%
-  faster. A response or request head no longer allocates a list of its
-  fields.
-- `h1/requests_10k` measures the same work through HTTP/1.1, to compare
-  HTTP/2 against.
 
 ---
 
